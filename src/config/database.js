@@ -18,7 +18,7 @@ const pool = mysql.createPool({
     connection.release();
   } catch (error) {
     console.error('Ошибка подключения к базе данных:', error.message);
-    process.exit(1); // Завершаем процесс при ошибке
+    process.exit(1); // Завершаем процесс при ошибке444
   }
 })();
 
