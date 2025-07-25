@@ -5,8 +5,14 @@ const jwt = require('jsonwebtoken');
 const register = async (req, res) => {
   const { name, phone, password } = req.body;
 
+  // Проверка на наличие всех обязательных полей
   if (!name || !phone || !password) {
-    return res.status(400).json({ message: 'Заполните все поля' });
+    return res.status(400).json({ message: 'Пожалуйста, заполните все поля: имя, телефон и пароль' });
+  }
+
+  // Проверка типа данных
+  if (typeof password !== 'string' || password.length < 6) {
+    return res.status(400).json({ message: 'Пароль должен быть строкой и содержать минимум 6 символов' });
   }
 
   try {
@@ -25,22 +31,28 @@ const register = async (req, res) => {
     res.status(201).json({ message: 'Пользователь успешно зарегистрирован' });
   } catch (error) {
     console.error('Ошибка регистрации:', error);
-    res.status(500).json({ message: 'Ошибка сервера' });
+    res.status(500).json({ message: 'Произошла ошибка на сервере' });
   }
 };
 
 const login = async (req, res) => {
   const { phone, password } = req.body;
 
+  // Проверка на наличие всех обязательных полей
   if (!phone || !password) {
-    return res.status(400).json({ message: 'Заполните все поля' });
+    return res.status(400).json({ message: 'Пожалуйста, заполните все поля: телефон и пароль' });
+  }
+
+  // Проверка типа данных
+  if (typeof password !== 'string') {
+    return res.status(400).json({ message: 'Пароль должен быть строкой' });
   }
 
   try {
     // Ищем пользователя по номеру телефона
     const [user] = await pool.query('SELECT * FROM users WHERE phone = ?', [phone]);
     if (user.length === 0) {
-      return res.status(400).json({ message: 'Пользователь не найден' });
+      return res.status(400).json({ message: 'Пользователь с таким номером телефона не найден' });
     }
 
     // Проверяем пароль
@@ -59,7 +71,7 @@ const login = async (req, res) => {
     res.json({ token, user: { id: user[0].id, name: user[0].name, phone: user[0].phone } });
   } catch (error) {
     console.error('Ошибка входа:', error);
-    res.status(500).json({ message: 'Ошибка сервера' });
+    res.status(500).json({ message: 'Произошла ошибка на сервере' });
   }
 };
 
