@@ -13,8 +13,32 @@ const initUsersTable = async () => {
     `);
     console.log('Таблица пользователей создана или уже существует');
   } catch (error) {
-    console.error('Ошибка при создании таблицы:', error);
+    console.error('Ошибка при создании таблицы пользователей:', error);
   }
 };
 
-module.exports = { initUsersTable };
+const initMessagesTable = async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        sender_id INT NOT NULL,
+        receiver_id INT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (sender_id) REFERENCES users(id),
+        FOREIGN KEY (receiver_id) REFERENCES users(id)
+      )
+    `);
+    console.log('Таблица сообщений создана или уже существует');
+  } catch (error) {
+    console.error('Ошибка при создании таблицы сообщений:', error);
+  }
+};
+
+const initTables = async () => {
+  await initUsersTable();
+  await initMessagesTable();
+};
+
+module.exports = { initTables };
