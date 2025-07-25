@@ -129,6 +129,31 @@ router.post('/login', async (req, res) => {
   }
 });
 
+
+
+// Список пользователей для чатов
+router.get('/users', authenticateToken, async (req, res) => {
+  try {
+    // Получаем всех пользователей, кроме текущего
+    const [rows] = await pool.query('SELECT id, name, phone FROM users WHERE id != ?', [
+      req.user.id,
+    ]);
+    res.json({
+      success: true,
+      data: rows.map((user) => ({
+        id: user.id,
+        name: user.name,
+        phone: user.phone,
+        lastMessage: 'Нет сообщений', // По умолчанию, можно обновить с messages
+        time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }), // Форматированное время (HH:mm)
+        unread: 0, // По умолчанию
+      })),
+    });
+  } catch (error) {
+    console.error('Ошибка получения списка пользователей:', error);
+    res.status(500).json({ success: false, message: 'Ошибка сервера' });
+  }
+});
 // Профиль пользователя (защищённый маршрут)
 router.get('/user/profile', authenticateToken, async (req, res) => {
   try {
