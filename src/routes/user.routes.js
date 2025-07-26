@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/user.controller');
 const pool = require('../config/database');
+const WebSocket = require('ws');
+const jwt = require('jsonwebtoken');
 
 // Middleware для проверки JWT
 const authenticateToken = (req, res, next) => {
@@ -13,21 +15,18 @@ const authenticateToken = (req, res, next) => {
   }
 
   try {
-    const jwt = require('jsonwebtoken');
-    const JWT_SECRET = process.env.JWT_SECRET || 'your-secure-secret-key'; // Должен быть в .env
+    const JWT_SECRET = process.env.JWT_SECRET || 'your-secure-secret-key';
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded; // Предполагаем, что токен содержит id пользователя
+    req.user = decoded;
     next();
-  } catch (err) {
+  } catch (error) {
     return res.status(403).json({ success: false, message: 'Недействительный токен' });
   }
 };
-
 // Регистрация (с сохранением токена)
 router.post('/register', async (req, res) => {
   const { name, phone, password, serviceAgreement } = req.body;
 
-  // Проверка обязательных полей
   if (!name || !phone || !password || !serviceAgreement) {
     return res.status(400).json({
       success: false,
@@ -36,7 +35,6 @@ router.post('/register', async (req, res) => {
   }
 
   try {
-    // Проверка уникальности телефона
     const [existingUsers] = await pool.query('SELECT * FROM users WHERE phone = ?', [phone]);
     if (existingUsers.length > 0) {
       return res.status(400).json({
@@ -45,17 +43,13 @@ router.post('/register', async (req, res) => {
       });
     }
 
-    // Хеширование пароля
     const bcrypt = require('bcryptjs');
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    // Генерация JWT токена
-    const jwt = require('jsonwebtoken');
     const JWT_SECRET = process.env.JWT_SECRET || 'your-secure-secret-key';
-    const token = jwt.sign({ phone }, JWT_SECRET, { expiresIn: '1h' }); // Токен с истечением через 1 час
+    const token = jwt.sign({ phone }, JWT_SECRET, { expiresIn: '1h' });
 
-    // Сохранение пользователя в базе данных с токеном
     const [result] = await pool.query(
       'INSERT INTO users (name, phone, password, token) VALUES (?, ?, ?, ?)',
       [name, phone, hashedPassword, token]
@@ -76,7 +70,6 @@ router.post('/register', async (req, res) => {
   }
 });
 
-// Логин (возвращает новый токен)
 // Логин (возвращает новый токен и user.id)
 router.post('/login', async (req, res) => {
   const { phone, password } = req.body;
@@ -108,19 +101,17 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    // Генерация нового токена при входе
-    const jwt = require('jsonwebtoken');
     const JWT_SECRET = process.env.JWT_SECRET || 'your-secure-secret-key';
     const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '1h' });
 
-    // Обновление токена в базе данных
     await pool.query('UPDATE users SET token = ? WHERE id = ?', [token, user.id]);
 
     res.json({
       success: true,
       message: 'Вход выполнен успешно',
       token: token,
-      user: { id: user.id, phone: user.phone } // Добавляем объект user с id и phone
+      userId: user.id,
+      phone: user.phone,
     });
   } catch (error) {
     console.error('Ошибка при входе:', error);
@@ -131,24 +122,44 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// Обновление токена
+router.post('/refresh-token', async (req, res) => {
+  const { token } = req.body;
 
+  if (!token) {
+    return res.status(401).json({ success: false, message: 'Токен не предоставлен' });
+  }
+
+  try {
+    const JWT_SECRET = process.env.JWT_SECRET || 'your-secure-secret-key';
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const newToken = jwt.sign({ id: decoded.id, phone: decoded.phone }, JWT_SECRET, { expiresIn: '1h' });
+
+    await pool.query('UPDATE users SET token = ? WHERE id = ?', [newToken, decoded.id]);
+
+    res.json({
+      success: true,
+      token: newToken,
+    });
+  } catch (error) {
+    console.error('Ошибка при обновлении токена:', error);
+    res.status(403).json({ success: false, message: 'Недействительный токен' });
+  }
+});
 
 // Список пользователей для чатов
 router.get('/users', authenticateToken, async (req, res) => {
   try {
-    // Получаем всех пользователей, кроме текущего
-    const [rows] = await pool.query('SELECT id, name, phone FROM users WHERE id != ?', [
-      req.user.id,
-    ]);
+    const [rows] = await pool.query('SELECT id, name, phone FROM users WHERE id != ?', [req.user.id]);
     res.json({
       success: true,
       data: rows.map((user) => ({
         id: user.id,
         name: user.name,
         phone: user.phone,
-        lastMessage: 'Нет сообщений', // По умолчанию, можно обновить с messages
-        time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }), // Форматированное время (HH:mm)
-        unread: 0, // По умолчанию
+        lastMessage: 'Нет сообщений',
+        time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+        unread: 0,
       })),
     });
   } catch (error) {
@@ -156,7 +167,8 @@ router.get('/users', authenticateToken, async (req, res) => {
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
 });
-// Профиль пользователя (защищённый маршрут)
+
+// Профиль пользователя
 router.get('/user/profile', authenticateToken, async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT name, phone FROM users WHERE id = ?', [req.user.id]);
@@ -173,9 +185,98 @@ router.get('/user/profile', authenticateToken, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Profile error:', error);
+    console.error('Ошибка профиля:', error);
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
 });
 
-module.exports = router;
+// WebSocket-сервер (добавляем в основной сервер, а не в router)
+module.exports = (server) => {
+  const wss = new WebSocket.Server({ server });
+
+  const clients = new Map(); // Хранит WebSocket-клиентов по userId
+
+  wss.on('connection', (ws, req) => {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const token = url.searchParams.get('token');
+
+    if (!token) {
+      ws.send(JSON.stringify({ success: false, message: 'Токен не предоставлен' }));
+      ws.close();
+      return;
+    }
+
+    try {
+      const JWT_SECRET = process.env.JWT_SECRET || 'your-secure-secret-key';
+      const decoded = jwt.verify(token, JWT_SECRET);
+      const userId = decoded.id;
+
+      // Сохраняем клиента
+      clients.set(userId, ws);
+      console.log(`Пользователь ${userId} подключился к WebSocket`);
+
+      ws.on('message', async (message) => {
+        try {
+          const data = JSON.parse(message);
+
+          // Обработка сообщений чата
+          if (data.type === 'message') {
+            const { senderId, receiverId, content, type } = data;
+
+            // Сохраняем сообщение в базе данных
+            const [result] = await pool.query(
+              'INSERT INTO messages (sender_id, receiver_id, content, type, created_at) VALUES (?, ?, ?, ?, NOW())',
+              [senderId, receiverId, content, type]
+            );
+
+            const messageData = {
+              id: result.insertId,
+              senderId,
+              receiverId,
+              content,
+              type,
+              createdAt: new Date().toISOString(),
+            };
+
+            // Отправляем сообщение получателю, если он онлайн
+            const receiverWs = clients.get(receiverId);
+            if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
+              receiverWs.send(JSON.stringify({ type: 'message', ...messageData }));
+            }
+
+            // Отправляем подтверждение отправителю
+            ws.send(JSON.stringify({ success: true, message: messageData }));
+          }
+
+          // Обработка звонков
+          if (data.type === 'offer' || data.type === 'answer' || data.type === 'ice_candidate') {
+            const receiverWs = clients.get(data.receiverId);
+            if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
+              receiverWs.send(JSON.stringify(data));
+            } else {
+              ws.send(JSON.stringify({ type: 'offline', receiverId: data.receiverId }));
+            }
+          }
+        } catch (error) {
+          console.error('Ошибка обработки WebSocket-сообщения:', error);
+          ws.send(JSON.stringify({ success: false, message: 'Ошибка обработки сообщения' }));
+        }
+      });
+
+      ws.on('close', () => {
+        clients.delete(userId);
+        console.log(`Пользователь ${userId} отключился от WebSocket`);
+      });
+
+      ws.on('error', (error) => {
+        console.error(`Ошибка WebSocket для пользователя ${userId}:`, error);
+      });
+    } catch (error) {
+      console.error('Ошибка аутентификации WebSocket:', error);
+      ws.send(JSON.stringify({ success: false, message: 'Недействительный токен' }));
+      ws.close();
+    }
+  });
+
+  return router;
+};
