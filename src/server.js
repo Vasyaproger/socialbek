@@ -51,7 +51,7 @@ wss.on('connection', (ws, req) => {
     const userId = decoded.id;
 
     // Сохраняем клиента
-    clients.set(userId, ws);
+    clients.set(userId.toString(), ws); // Ensure userId is stored as string
     console.log(`Пользователь ${userId} подключился к WebSocket`);
 
     ws.on('message', async (message) => {
@@ -61,6 +61,18 @@ wss.on('connection', (ws, req) => {
         // Обработка сообщений чата
         if (data.type === 'message') {
           const { senderId, receiverId, content, type } = data;
+
+          // Validate input
+          if (!senderId || !receiverId || !content || !type) {
+            ws.send(JSON.stringify({ success: false, message: 'Отсутствуют обязательные поля' }));
+            return;
+          }
+
+          // Verify sender
+          if (senderId !== userId.toString()) {
+            ws.send(JSON.stringify({ success: false, message: 'Недостаточно прав' }));
+            return;
+          }
 
           // Сохраняем сообщение в базе данных
           const [result] = await pool.query(
@@ -103,7 +115,7 @@ wss.on('connection', (ws, req) => {
     });
 
     ws.on('close', () => {
-      clients.delete(userId);
+      clients.delete(userId.toString());
       console.log(`Пользователь ${userId} отключился от WebSocket`);
     });
 
