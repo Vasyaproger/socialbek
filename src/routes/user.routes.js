@@ -77,7 +77,6 @@ router.post('/register', async (req, res) => {
 });
 
 // Логин (возвращает новый токен)
-// Логин (возвращает новый токен и user.id)
 router.post('/login', async (req, res) => {
   const { phone, password } = req.body;
 
@@ -120,7 +119,6 @@ router.post('/login', async (req, res) => {
       success: true,
       message: 'Вход выполнен успешно',
       token: token,
-      user: { id: user.id, phone: user.phone } // Добавляем объект user с id и phone
     });
   } catch (error) {
     console.error('Ошибка при входе:', error);
