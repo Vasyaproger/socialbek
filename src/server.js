@@ -1,3 +1,4 @@
+
 const express = require('express');
 const dotenv = require('dotenv');
 const cors = require('cors');
@@ -40,6 +41,7 @@ wss.on('connection', (ws, req) => {
   const token = url.searchParams.get('token');
 
   if (!token) {
+    console.error('Токен не предоставлен в WebSocket-запросе');
     ws.send(JSON.stringify({ success: false, message: 'Токен не предоставлен' }));
     ws.close();
     return;
@@ -51,25 +53,36 @@ wss.on('connection', (ws, req) => {
     const userId = decoded.id;
 
     // Сохраняем клиента
-    clients.set(userId.toString(), ws); // Ensure userId is stored as string
+    clients.set(userId.toString(), ws);
     console.log(`Пользователь ${userId} подключился к WebSocket`);
 
     ws.on('message', async (message) => {
       try {
         const data = JSON.parse(message);
+        console.log(`Получено WebSocket-сообщение от ${userId}:`, data);
 
         // Обработка сообщений чата
         if (data.type === 'message') {
           const { senderId, receiverId, content, type } = data;
 
-          // Validate input
+          // Проверка допустимых типов сообщений
+          const validTypes = ['text', 'sticker', 'video', 'video_circle'];
+          if (!validTypes.includes(type)) {
+            console.error(`Недопустимый тип сообщения: ${type}`);
+            ws.send(JSON.stringify({ success: false, message: 'Недопустимый тип сообщения' }));
+            return;
+          }
+
+          // Проверка обязательных полей
           if (!senderId || !receiverId || !content || !type) {
+            console.error('Отсутствуют обязательные поля:', { senderId, receiverId, content, type });
             ws.send(JSON.stringify({ success: false, message: 'Отсутствуют обязательные поля' }));
             return;
           }
 
-          // Verify sender
+          // Проверка отправителя
           if (senderId !== userId.toString()) {
+            console.error(`Несовпадение senderId (${senderId}) и userId (${userId})`);
             ws.send(JSON.stringify({ success: false, message: 'Недостаточно прав' }));
             return;
           }
@@ -79,6 +92,7 @@ wss.on('connection', (ws, req) => {
             'INSERT INTO messages (sender_id, receiver_id, content, type, created_at) VALUES (?, ?, ?, ?, NOW())',
             [senderId, receiverId, content, type]
           );
+          console.log(`Сообщение сохранено в базе данных, id: ${result.insertId}`);
 
           const messageData = {
             id: result.insertId,
@@ -93,23 +107,31 @@ wss.on('connection', (ws, req) => {
           const receiverWs = clients.get(receiverId);
           if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
             receiverWs.send(JSON.stringify({ type: 'message', ...messageData }));
+            console.log(`Сообщение отправлено получателю ${receiverId}`);
+          } else {
+            console.log(`Получатель ${receiverId} не в сети`);
           }
 
           // Отправляем подтверждение отправителю
           ws.send(JSON.stringify({ success: true, message: messageData }));
+          console.log(`Подтверждение отправлено отправителю ${senderId}`);
         }
-
         // Обработка звонков
-        if (data.type === 'offer' || data.type === 'answer' || data.type === 'ice_candidate') {
+        else if (data.type === 'offer' || data.type === 'answer' || data.type === 'ice_candidate') {
           const receiverWs = clients.get(data.receiverId);
           if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
             receiverWs.send(JSON.stringify(data));
+            console.log(`Передано WebRTC-сообщение (${data.type}) для ${data.receiverId}`);
           } else {
             ws.send(JSON.stringify({ type: 'offline', receiverId: data.receiverId }));
+            console.log(`Получатель ${data.receiverId} не в сети для WebRTC`);
           }
+        } else {
+          console.error(`Неизвестный тип сообщения: ${data.type}`);
+          ws.send(JSON.stringify({ success: false, message: 'Неизвестный тип сообщения' }));
         }
       } catch (error) {
-        console.error('Ошибка обработки WebSocket-сообщения:', error);
+        console.error('Ошибка обработки WebSocket-сообщения:', error.message, error.stack);
         ws.send(JSON.stringify({ success: false, message: 'Ошибка обработки сообщения' }));
       }
     });
@@ -120,10 +142,10 @@ wss.on('connection', (ws, req) => {
     });
 
     ws.on('error', (error) => {
-      console.error(`Ошибка WebSocket для пользователя ${userId}:`, error);
+      console.error(`Ошибка WebSocket для пользователя ${userId}:`, error.message, error.stack);
     });
   } catch (error) {
-    console.error('Ошибка аутентификации WebSocket:', error);
+    console.error('Ошибка аутентификации WebSocket:', error.message, error.stack);
     ws.send(JSON.stringify({ success: false, message: 'Недействительный токен' }));
     ws.close();
   }
