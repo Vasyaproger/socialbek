@@ -38,37 +38,37 @@ const register = async (req, res) => {
 const login = async (req, res) => {
   const { phone, password } = req.body;
 
-  // Проверка на наличие всех обязательных полей
   if (!phone || !password) {
     return res.status(400).json({ message: 'Пожалуйста, заполните все поля: телефон и пароль' });
   }
 
-  // Проверка типа данных
   if (typeof password !== 'string') {
     return res.status(400).json({ message: 'Пароль должен быть строкой' });
   }
 
   try {
-    // Ищем пользователя по номеру телефона
     const [user] = await pool.query('SELECT * FROM users WHERE phone = ?', [phone]);
     if (user.length === 0) {
       return res.status(400).json({ message: 'Пользователь с таким номером телефона не найден' });
     }
 
-    // Проверяем пароль
     const isMatch = await bcrypt.compare(password, user[0].password);
     if (!isMatch) {
       return res.status(400).json({ message: 'Неверный пароль' });
     }
 
-    // Создаём JWT-токен
     const token = jwt.sign(
       { id: user[0].id, phone: user[0].phone },
       process.env.JWT_SECRET,
       { expiresIn: '1h' }
     );
 
-    res.json({ token, user: { id: user[0].id, name: user[0].name, phone: user[0].phone } });
+    res.json({
+      success: true,
+      message: 'Вход выполнен успешно',
+      token,
+      id: user[0].id // Добавляем id в ответ
+    });
   } catch (error) {
     console.error('Ошибка входа:', error);
     res.status(500).json({ message: 'Произошла ошибка на сервере' });
