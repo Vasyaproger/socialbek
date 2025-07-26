@@ -1,3 +1,4 @@
+
 const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/user.controller');
@@ -89,7 +90,7 @@ const initializeDatabase = async () => {
     await connection.query(`
       CREATE TABLE IF NOT EXISTS story_views (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        story_id INT NOT NULL,
+        story_id INT NOT NOT NULL,
         viewer_id INT NOT NULL,
         viewed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE,
@@ -98,6 +99,21 @@ const initializeDatabase = async () => {
       )
     `);
     console.log('Таблица story_views готова');
+
+    // Создание таблицы messages
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        sender_id INT NOT NULL,
+        receiver_id INT NOT NULL,
+        content TEXT NOT NULL,
+        type ENUM('text', 'sticker', 'video', 'video_circle') NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+    console.log('Таблица messages готова');
 
     connection.release();
   } catch (err) {
@@ -162,6 +178,56 @@ router.post('/stories', authenticateToken, (req, res, next) => {
   }
 });
 
+// Маршрут для загрузки видео (используется для обычных видео и видео-кружков)
+router.post('/videos/upload', authenticateToken, (req, res, next) => {
+  upload(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      console.error('Ошибка Multer:', err.message, err.stack);
+      return res.status(400).json({ success: false, message: `Ошибка Multer: ${err.message}` });
+    } else if (err) {
+      console.error('Ошибка фильтрации файла:', err.message);
+      return res.status(400).json({ success: false, message: err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const file = req.file;
+
+    if (!file) {
+      console.error('Файл не предоставлен в запросе:', req.body, req.headers);
+      return res.status(400).json({ success: false, message: 'Файл не предоставлен' });
+    }
+
+    console.log('Загружаемый файл:', file.originalname, file.mimetype, file.size);
+
+    const fileName = `${userId}/${Date.now()}${path.extname(file.originalname)}`;
+    const bucketName = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+
+    const params = {
+      Bucket: bucketName,
+      Key: fileName,
+      Body: file.buffer,
+      ContentType: file.mimetype,
+      ACL: 'public-read',
+    };
+
+    const s3Response = await s3.upload(params).promise();
+    const fileUrl = s3Response.Location;
+    console.log('Видео загружено в S3:', fileUrl);
+
+    res.json({
+      success: true,
+      message: 'Видео успешно загружено',
+      url: fileUrl,
+    });
+  } catch (error) {
+    console.error('Ошибка при загрузке видео:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при загрузке видео', error: error.message });
+  }
+});
+
 // Маршрут для получения историй
 router.get('/stories', authenticateToken, async (req, res) => {
   try {
@@ -202,7 +268,7 @@ router.post('/stories/:storyId/view', authenticateToken, async (req, res) => {
     }
 
     // Регистрируем просмотр (игнорируем, если уже просмотрен)
-    await pool.query(
+    await connection.query(
       'INSERT IGNORE INTO story_views (story_id, viewer_id) VALUES (?, ?)',
       [storyId, viewerId]
     );
