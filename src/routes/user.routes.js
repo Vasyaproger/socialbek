@@ -55,30 +55,44 @@ const upload = multer({
   },
 }).single('file'); // Поле формы должно называться 'file'
 
-// Проверка подключения к базе данных и создание таблицы stories
-pool.getConnection((err, connection) => {
-  if (err) {
-    console.error('Ошибка подключения к базе данных:', err.stack);
-    return;
-  }
-  console.log('Подключение к базе данных успешно');
-  connection.query(`
-    CREATE TABLE IF NOT EXISTS stories (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      user_id INT NOT NULL,
-      file_path VARCHAR(255) NOT NULL,
-      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    )
-  `, (err) => {
+// Инициализация базы данных: создание таблиц users и stories
+const initializeDatabase = async () => {
+  try {
+    const connection = await pool.getConnection();
+    console.log('Подключение к базе данных успешно');
+
+    // Создание таблицы users
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        phone VARCHAR(20) NOT NULL UNIQUE,
+        password VARCHAR(255) NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('Таблица users готова');
+
+    // Создание таблицы stories
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS stories (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        file_path VARCHAR(255) NOT NULL,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+    console.log('Таблица stories готова');
+
     connection.release();
-    if (err) {
-      console.error('Ошибка создания таблицы stories:', err.stack);
-    } else {
-      console.log('Таблица stories готова');
-    }
-  });
-});
+  } catch (err) {
+    console.error('Ошибка инициализации базы данных:', err.stack);
+  }
+};
+
+// Вызываем инициализацию базы данных при запуске
+initializeDatabase();
 
 // Маршрут для загрузки историй
 router.post('/stories', authenticateToken, (req, res, next) => {
