@@ -1,3 +1,4 @@
+
 const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/user.controller');
@@ -40,13 +41,10 @@ const s3 = new AWS.S3({
 // Конфигурация Multer для поддержки всех форматов
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // Ограничение 10 МБ
+  limits: { fileSize: 50 * 1024 * 1024 }, // Увеличено до 50 МБ
   fileFilter: (req, file, cb) => {
-    // Разрешённые расширения файлов
-    const fileTypes = /\.(jpeg|jpg|png|gif|webp|mp4|mov|avi|mkv)$/i;
+    const fileTypes = /\.(jpeg|jpg|png|gif|webp|mp4|mov|avi|mkv|m4a|mp3|wav)$/i;
     const extname = fileTypes.test(path.extname(file.originalname).toLowerCase());
-
-    // Разрешённые MIME-типы
     const mimeTypes = [
       'image/jpeg',
       'image/png',
@@ -56,7 +54,10 @@ const upload = multer({
       'video/quicktime',
       'video/x-msvideo',
       'video/x-matroska',
-      'application/octet-stream', // Для нестандартных клиентов
+      'audio/mp4',
+      'audio/mpeg',
+      'audio/wav',
+      'application/octet-stream',
     ];
     const mimetype = mimeTypes.includes(file.mimetype);
 
@@ -65,7 +66,7 @@ const upload = multer({
       return cb(null, true);
     } else {
       console.error('Неподдерживаемый тип файла:', file.originalname, file.mimetype);
-      cb(new Error('Разрешены только изображения (jpg, png, gif, webp) и видео (mp4, mov, avi, mkv)'));
+      cb(new Error('Разрешены только изображения (jpg, png, gif, webp), видео (mp4, mov, avi, mkv) и аудио (m4a, mp3, wav)'));
     }
   },
 }).fields([
@@ -74,7 +75,85 @@ const upload = multer({
   { name: 'video', maxCount: 1 },
 ]);
 
-// Маршрут для загрузки историй
+// Обновление базы данных для поддержки типа voice
+const initializeDatabase = async () => {
+  try {
+    const connection = await pool.getConnection();
+    console.log('Подключение к базе данных успешно');
+
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        sender_id INT NOT NULL,
+        receiver_id INT NOT NULL,
+        content TEXT NOT NULL,
+        type ENUM('text', 'sticker', 'video', 'video_circle', 'voice') NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+    console.log('Таблица messages готова');
+
+    connection.release();
+  } catch (err) {
+    console.error('Ошибка инициализации базы данных:', err.stack);
+  }
+};
+
+initializeDatabase();
+
+// Маршрут для загрузки файлов (видео, аудио)
+router.post('/files/upload', authenticateToken, (req, res, next) => {
+  upload(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      console.error('Ошибка Multer:', err.message, err.stack);
+      return res.status(400).json({ success: false, message: `Ошибка Multer: ${err.message}` });
+    } else if (err) {
+      console.error('Ошибка фильтрации файла:', err.message);
+      return res.status(400).json({ success: false, message: err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const file = req.files['file']?.[0] || req.files['image']?.[0] || req.files['video']?.[0];
+
+    if (!file) {
+      console.error('Файл не предоставлен в запросе:', req.body, req.headers);
+      return res.status(400).json({ success: false, message: 'Файл не предоставлен' });
+    }
+
+    console.log('Загружаемый файл:', file.originalname, file.mimetype, file.size);
+
+    const fileName = `${userId}/${Date.now()}${path.extname(file.originalname)}`;
+    const bucketName = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+
+    const params = {
+      Bucket: bucketName,
+      Key: fileName,
+      Body: file.buffer,
+      ContentType: file.mimetype,
+      ACL: 'public-read',
+    };
+
+    const s3Response = await s3.upload(params).promise();
+    const fileUrl = s3Response.Location;
+    console.log('Файл загружен в S3:', fileUrl);
+
+    res.json({
+      success: true,
+      message: 'Файл успешно загружен',
+      url: fileUrl,
+    });
+  } catch (error) {
+    console.error('Ошибка при загрузке файла:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при загрузке файла', error: error.message });
+  }
+});
+
+// Остальные маршруты остаются без изменений
 router.post('/stories', authenticateToken, (req, res, next) => {
   upload(req, res, (err) => {
     if (err instanceof multer.MulterError) {
@@ -129,57 +208,6 @@ router.post('/stories', authenticateToken, (req, res, next) => {
   }
 });
 
-// Маршрут для загрузки видео
-router.post('/videos/upload', authenticateToken, (req, res, next) => {
-  upload(req, res, (err) => {
-    if (err instanceof multer.MulterError) {
-      console.error('Ошибка Multer:', err.message, err.stack);
-      return res.status(400).json({ success: false, message: `Ошибка Multer: ${err.message}` });
-    } else if (err) {
-      console.error('Ошибка фильтрации файла:', err.message);
-      return res.status(400).json({ success: false, message: err.message });
-    }
-    next();
-  });
-}, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const file = req.files['file']?.[0] || req.files['image']?.[0] || req.files['video']?.[0];
-
-    if (!file) {
-      console.error('Файл не предоставлен в запросе:', req.body, req.headers);
-      return res.status(400).json({ success: false, message: 'Файл не предоставлен' });
-    }
-
-    console.log('Загружаемый файл:', file.originalname, file.mimetype, file.size);
-
-    const fileName = `${userId}/${Date.now()}${path.extname(file.originalname)}`;
-    const bucketName = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
-
-    const params = {
-      Bucket: bucketName,
-      Key: fileName,
-      Body: file.buffer,
-      ContentType: file.mimetype,
-      ACL: 'public-read',
-    };
-
-    const s3Response = await s3.upload(params).promise();
-    const fileUrl = s3Response.Location;
-    console.log('Видео загружено в S3:', fileUrl);
-
-    res.json({
-      success: true,
-      message: 'Видео успешно загружено',
-      url: fileUrl,
-    });
-  } catch (error) {
-    console.error('Ошибка при загрузке видео:', error.stack);
-    res.status(500).json({ success: false, message: 'Ошибка сервера при загрузке видео', error: error.message });
-  }
-});
-
-// Остальные маршруты (регистрация, логин, профиль, просмотр историй и т.д.) остаются без изменений
 router.post('/register', userController.register);
 router.post('/login', userController.login);
 router.get('/users', authenticateToken, async (req, res) => {
