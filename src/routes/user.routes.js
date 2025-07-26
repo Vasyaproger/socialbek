@@ -53,9 +53,9 @@ const upload = multer({
       cb(new Error('Разрешены только изображения (jpg, png) и видео (mp4)'));
     }
   },
-}).single('file'); // Поле формы должно называться 'file'
+}).single('file');
 
-// Инициализация базы данных: создание таблиц users и stories
+// Инициализация базы данных
 const initializeDatabase = async () => {
   try {
     const connection = await pool.getConnection();
@@ -85,13 +85,26 @@ const initializeDatabase = async () => {
     `);
     console.log('Таблица stories готова');
 
+    // Создание таблицы story_views
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS story_views (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        story_id INT NOT NULL,
+        viewer_id INT NOT NULL,
+        viewed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE,
+        FOREIGN KEY (viewer_id) REFERENCES users(id) ON DELETE CASCADE,
+        UNIQUE (story_id, viewer_id)
+      )
+    `);
+    console.log('Таблица story_views готова');
+
     connection.release();
   } catch (err) {
     console.error('Ошибка инициализации базы данных:', err.stack);
   }
 };
 
-// Вызываем инициализацию базы данных при запуске
 initializeDatabase();
 
 // Маршрут для загрузки историй
@@ -146,6 +159,100 @@ router.post('/stories', authenticateToken, (req, res, next) => {
   } catch (error) {
     console.error('Ошибка при загрузке истории:', error.stack);
     res.status(500).json({ success: false, message: 'Ошибка сервера при загрузке истории', error: error.message });
+  }
+});
+
+// Маршрут для получения историй
+router.get('/stories', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const [rows] = await pool.query(
+      'SELECT id, user_id, file_path, timestamp FROM stories WHERE user_id = ?',
+      [userId]
+    );
+
+    if (rows.length === 0) {
+      return res.json({ success: true, data: [], message: 'Истории отсутствуют' });
+    }
+
+    const stories = rows.map(row => ({
+      id: row.id,
+      user_id: row.user_id,
+      file_path: row.file_path,
+      timestamp: row.timestamp,
+    }));
+
+    res.json({ success: true, data: stories });
+  } catch (error) {
+    console.error('Ошибка получения историй:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при получении историй', error: error.message });
+  }
+});
+
+// Маршрут для регистрации просмотра истории
+router.post('/stories/:storyId/view', authenticateToken, async (req, res) => {
+  try {
+    const { storyId } = req.params;
+    const viewerId = req.user.id;
+
+    // Проверяем, существует ли история
+    const [storyRows] = await pool.query('SELECT id FROM stories WHERE id = ?', [storyId]);
+    if (storyRows.length === 0) {
+      return res.status(404).json({ success: false, message: 'История не найдена' });
+    }
+
+    // Регистрируем просмотр (игнорируем, если уже просмотрен)
+    await pool.query(
+      'INSERT IGNORE INTO story_views (story_id, viewer_id) VALUES (?, ?)',
+      [storyId, viewerId]
+    );
+
+    res.json({ success: true, message: 'Просмотр зарегистрирован' });
+  } catch (error) {
+    console.error('Ошибка регистрации просмотра:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при регистрации просмотра', error: error.message });
+  }
+});
+
+// Маршрут для получения просмотров истории
+router.get('/stories/:storyId/views', authenticateToken, async (req, res) => {
+  try {
+    const { storyId } = req.params;
+    const userId = req.user.id;
+
+    // Проверяем, принадлежит ли история пользователю
+    const [storyRows] = await pool.query(
+      'SELECT id FROM stories WHERE id = ? AND user_id = ?',
+      [storyId, userId]
+    );
+    if (storyRows.length === 0) {
+      return res.status(403).json({ success: false, message: 'Доступ запрещён или история не найдена' });
+    }
+
+    // Получаем количество просмотров и список зрителей
+    const [viewRows] = await pool.query(
+      `
+      SELECT u.id, u.name
+      FROM story_views sv
+      JOIN users u ON sv.viewer_id = u.id
+      WHERE sv.story_id = ?
+      `,
+      [storyId]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        viewCount: viewRows.length,
+        viewers: viewRows.map(row => ({
+          id: row.id,
+          name: row.name,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error('Ошибка получения просмотров:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при получении просмотров', error: error.message });
   }
 });
 
