@@ -64,11 +64,11 @@ const login = async (req, res) => {
     );
 
     res.json({
-      success: true,
-      message: 'Вход выполнен успешно',
-      token,
-      id: user[0].id // Добавляем id в ответ
-    });
+  success: true,
+  message: 'Вход выполнен успешно',
+  token,
+  user: { id: user[0].id, phone: user[0].phone } // Обернуть id и phone в объект user
+});
   } catch (error) {
     console.error('Ошибка входа:', error);
     res.status(500).json({ message: 'Произошла ошибка на сервере' });
