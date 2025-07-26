@@ -87,18 +87,19 @@ const initializeDatabase = async () => {
     console.log('Таблица stories готова');
 
     // Создание таблицы story_views
-    await connection.query(`
-      CREATE TABLE IF NOT EXISTS story_views (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        story_id INT NOT NOT NULL,
-        viewer_id INT NOT NULL,
-        viewed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE,
-        FOREIGN KEY (viewer_id) REFERENCES users(id) ON DELETE CASCADE,
-        UNIQUE (story_id, viewer_id)
-      )
-    `);
-    console.log('Таблица story_views готова');
+await connection.query(`
+  CREATE TABLE IF NOT EXISTS story_views (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    story_id INT NOT NULL,
+    viewer_id INT NOT NULL,
+    viewed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (story_id) REFERENCES stories(id) ON DELETE CASCADE,
+    FOREIGN KEY (viewer_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE (story_id, viewer_id)
+  )
+`);
+console.log('Таблица story_views готова');
+
 
     // Создание таблицы messages
     await connection.query(`
