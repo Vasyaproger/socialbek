@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/user.controller');
 const pool = require('../config/database');
+const AWS = require('aws-sdk');
+const multer = require('multer');
+const path = require('path');
 
 // Middleware для проверки JWT
 const authenticateToken = (req, res, next) => {
@@ -14,139 +17,94 @@ const authenticateToken = (req, res, next) => {
 
   try {
     const jwt = require('jsonwebtoken');
-    const JWT_SECRET = process.env.JWT_SECRET || 'your-secure-secret-key'; // Должен быть в .env
+    const JWT_SECRET = process.env.JWT_SECRET || 'your-secure-secret-key';
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded; // Предполагаем, что токен содержит id пользователя
+    req.user = decoded;
     next();
   } catch (err) {
     return res.status(403).json({ success: false, message: 'Недействительный токен' });
   }
 };
 
-// Регистрация (с сохранением токена)
-router.post('/register', async (req, res) => {
-  const { name, phone, password, serviceAgreement } = req.body;
-
-  // Проверка обязательных полей
-  if (!name || !phone || !password || !serviceAgreement) {
-    return res.status(400).json({
-      success: false,
-      message: 'Пожалуйста, заполните все поля: имя, телефон, пароль и соглашение',
-    });
-  }
-
-  try {
-    // Проверка уникальности телефона
-    const [existingUsers] = await pool.query('SELECT * FROM users WHERE phone = ?', [phone]);
-    if (existingUsers.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Этот номер телефона уже зарегистрирован',
-      });
-    }
-
-    // Хеширование пароля
-    const bcrypt = require('bcryptjs');
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-
-    // Генерация JWT токена
-    const jwt = require('jsonwebtoken');
-    const JWT_SECRET = process.env.JWT_SECRET || 'your-secure-secret-key';
-    const token = jwt.sign({ phone }, JWT_SECRET, { expiresIn: '1h' }); // Токен с истечением через 1 час
-
-    // Сохранение пользователя в базе данных с токеном
-    const [result] = await pool.query(
-      'INSERT INTO users (name, phone, password, token) VALUES (?, ?, ?, ?)',
-      [name, phone, hashedPassword, token]
-    );
-
-    res.status(201).json({
-      success: true,
-      message: 'Пользователь успешно зарегистрирован',
-      token: token,
-      userId: result.insertId,
-    });
-  } catch (error) {
-    console.error('Ошибка при регистрации:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Ошибка сервера при регистрации',
-    });
-  }
+// Настройка S3
+const s3 = new AWS.S3({
+  accessKeyId: 'DN1NLZTORA2L6NZ529JJ',
+  secretAccessKey: 'iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8',
+  region: 'ru-1',
+  endpoint: 'https://s3.twcstorage.ru', // S3 URL
+  s3ForcePathStyle: true, // Для совместимости с кастомным S3
 });
 
-// Логин (возвращает новый токен)
-router.post('/login', async (req, res) => {
-  const { phone, password } = req.body;
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
 
-  if (!phone || !password) {
-    return res.status(400).json({
-      success: false,
-      message: 'Пожалуйста, введите номер телефона и пароль',
-    });
-  }
+// Создание таблицы stories, если она не существует
+pool.query(`
+  CREATE TABLE IF NOT EXISTS stories (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    file_path VARCHAR(255) NOT NULL,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  )
+`);
 
+// Маршрут для загрузки историй
+router.post('/stories', authenticateToken, upload.single('file'), async (req, res) => {
   try {
-    const [users] = await pool.query('SELECT * FROM users WHERE phone = ?', [phone]);
-    if (users.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Пользователь не найден',
-      });
+    const userId = req.user.id;
+    const file = req.file;
+
+    if (!file) {
+      return res.status(400).json({ success: false, message: 'Файл не предоставлен' });
     }
 
-    const user = users[0];
-    const bcrypt = require('bcryptjs');
-    const isMatch = await bcrypt.compare(password, user.password);
+    const fileName = `${userId}/${Date.now()}${path.extname(file.originalname)}`;
+    const bucketName = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
 
-    if (!isMatch) {
-      return res.status(400).json({
-        success: false,
-        message: 'Неверный пароль',
-      });
-    }
+    const params = {
+      Bucket: bucketName,
+      Key: fileName,
+      Body: file.buffer,
+      ContentType: file.mimetype,
+    };
 
-    // Генерация нового токена при входе
-    const jwt = require('jsonwebtoken');
-    const JWT_SECRET = process.env.JWT_SECRET || 'your-secure-secret-key';
-    const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '1h' });
+    const s3Response = await s3.upload(params).promise();
+    const fileUrl = s3Response.Location;
 
-    // Обновление токена в базе данных
-    await pool.query('UPDATE users SET token = ? WHERE id = ?', [token, user.id]);
+    await pool.query(
+      'INSERT INTO stories (user_id, file_path, timestamp) VALUES (?, ?, NOW())',
+      [userId, fileUrl]
+    );
 
     res.json({
       success: true,
-      message: 'Вход выполнен успешно',
-      token: token,
+      message: 'История успешно добавлена',
+      fileUrl: fileUrl,
     });
   } catch (error) {
-    console.error('Ошибка при входе:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Ошибка сервера при входе',
-    });
+    console.error('Ошибка при загрузке истории:', error);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при загрузке истории' });
   }
 });
 
-
+// Используем контроллеры
+router.post('/register', userController.register);
+router.post('/login', userController.login);
 
 // Список пользователей для чатов
 router.get('/users', authenticateToken, async (req, res) => {
   try {
-    // Получаем всех пользователей, кроме текущего
-    const [rows] = await pool.query('SELECT id, name, phone FROM users WHERE id != ?', [
-      req.user.id,
-    ]);
+    const [rows] = await pool.query('SELECT id, name, phone FROM users WHERE id != ?', [req.user.id]);
     res.json({
       success: true,
       data: rows.map((user) => ({
         id: user.id,
         name: user.name,
         phone: user.phone,
-        lastMessage: 'Нет сообщений', // По умолчанию, можно обновить с messages
-        time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }), // Форматированное время (HH:mm)
-        unread: 0, // По умолчанию
+        lastMessage: 'Нет сообщений',
+        time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+        unread: 0,
       })),
     });
   } catch (error) {
@@ -154,7 +112,8 @@ router.get('/users', authenticateToken, async (req, res) => {
     res.status(500).json({ success: false, message: 'Ошибка сервера' });
   }
 });
-// Профиль пользователя (защищённый маршрут)
+
+// Профиль пользователя
 router.get('/user/profile', authenticateToken, async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT name, phone FROM users WHERE id = ?', [req.user.id]);

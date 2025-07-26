@@ -7,6 +7,6 @@ const { sendMessage, getMessages } = require('../controllers/message.controller'
 router.post('/messages', authenticateToken, sendMessage);
 
 // Получение сообщений между двумя пользователями
-router.get('/messages/:userId1/:userId2', authenticateToken, getMessages);
+router.get('/messages/:senderId/:receiverId', authenticateToken, getMessages);
 
 module.exports = router;

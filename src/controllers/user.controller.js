@@ -3,35 +3,47 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
 const register = async (req, res) => {
-  const { name, phone, password } = req.body;
+  const { name, phone, password, serviceAgreement } = req.body;
 
-  // Проверка на наличие всех обязательных полей
-  if (!name || !phone || !password) {
-    return res.status(400).json({ message: 'Пожалуйста, заполните все поля: имя, телефон и пароль' });
-  }
-
-  // Проверка типа данных
-  if (typeof password !== 'string' || password.length < 6) {
-    return res.status(400).json({ message: 'Пароль должен быть строкой и содержать минимум 6 символов' });
+  if (!name || !phone || !password || !serviceAgreement) {
+    return res.status(400).json({
+      success: false,
+      message: 'Пожалуйста, заполните все поля: имя, телефон, пароль и соглашение',
+    });
   }
 
   try {
-    // Проверяем, существует ли пользователь с таким номером телефона
-    const [existingUser] = await pool.query('SELECT * FROM users WHERE phone = ?', [phone]);
-    if (existingUser.length > 0) {
-      return res.status(400).json({ message: 'Пользователь с таким номером телефона уже существует' });
+    const [existingUsers] = await pool.query('SELECT * FROM users WHERE phone = ?', [phone]);
+    if (existingUsers.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Этот номер телефона уже зарегистрирован',
+      });
     }
 
-    // Хешируем пароль
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
 
-    // Сохраняем пользователя в базе
-    await pool.query('INSERT INTO users (name, phone, password) VALUES (?, ?, ?)', [name, phone, hashedPassword]);
+    const JWT_SECRET = process.env.JWT_SECRET || 'your-secure-secret-key';
+    const token = jwt.sign({ phone }, JWT_SECRET, { expiresIn: '1h' });
 
-    res.status(201).json({ message: 'Пользователь успешно зарегистрирован' });
+    const [result] = await pool.query(
+      'INSERT INTO users (name, phone, password, token) VALUES (?, ?, ?, ?)',
+      [name, phone, hashedPassword, token]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Пользователь успешно зарегистрирован',
+      token: token,
+      user: { userId: result.insertId, phone: phone } // Возвращаем user с userId
+    });
   } catch (error) {
-    console.error('Ошибка регистрации:', error);
-    res.status(500).json({ message: 'Произошла ошибка на сервере' });
+    console.error('Ошибка при регистрации:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Ошибка сервера при регистрации',
+    });
   }
 };
 
@@ -39,39 +51,48 @@ const login = async (req, res) => {
   const { phone, password } = req.body;
 
   if (!phone || !password) {
-    return res.status(400).json({ message: 'Пожалуйста, заполните все поля: телефон и пароль' });
-  }
-
-  if (typeof password !== 'string') {
-    return res.status(400).json({ message: 'Пароль должен быть строкой' });
+    return res.status(400).json({
+      success: false,
+      message: 'Пожалуйста, введите номер телефона и пароль',
+    });
   }
 
   try {
-    const [user] = await pool.query('SELECT * FROM users WHERE phone = ?', [phone]);
-    if (user.length === 0) {
-      return res.status(400).json({ message: 'Пользователь с таким номером телефона не найден' });
+    const [users] = await pool.query('SELECT id, phone, password FROM users WHERE phone = ?', [phone]);
+    if (users.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Пользователь не найден',
+      });
     }
 
-    const isMatch = await bcrypt.compare(password, user[0].password);
+    const user = users[0];
+    const isMatch = await bcrypt.compare(password, user.password);
+
     if (!isMatch) {
-      return res.status(400).json({ message: 'Неверный пароль' });
+      return res.status(400).json({
+        success: false,
+        message: 'Неверный пароль',
+      });
     }
 
-    const token = jwt.sign(
-      { id: user[0].id, phone: user[0].phone },
-      process.env.JWT_SECRET,
-      { expiresIn: '1h' }
-    );
+    const JWT_SECRET = process.env.JWT_SECRET || 'your-secure-secret-key';
+    const token = jwt.sign({ id: user.id, phone: user.phone }, JWT_SECRET, { expiresIn: '1h' });
+
+    await pool.query('UPDATE users SET token = ? WHERE id = ?', [token, user.id]);
 
     res.json({
-  success: true,
-  message: 'Вход выполнен успешно',
-  token,
-  user: { id: user[0].id, phone: user[0].phone } // Обернуть id и phone в объект user
-});
+      success: true,
+      message: 'Вход выполнен успешно',
+      token: token,
+      user: { userId: user.id, phone: user.phone } // Возвращаем user с userId
+    });
   } catch (error) {
-    console.error('Ошибка входа:', error);
-    res.status(500).json({ message: 'Произошла ошибка на сервере' });
+    console.error('Ошибка при входе:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Ошибка сервера при входе',
+    });
   }
 };
 
