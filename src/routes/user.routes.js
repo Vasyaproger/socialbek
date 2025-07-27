@@ -226,7 +226,7 @@ router.post('/groups', authenticateToken, upload, async (req, res) => {
     }
 
     const [result] = await pool.query(
-      'INSERT INTO groups (creator_id, name, description, avatar_url, is_public) VALUES (?, ?, ?, ?, ?)',
+     'INSERT INTO `groups` (creator_id, name, description, avatar_url, is_public) VALUES (?, ?, ?, ?, ?)',
       [userId, name, description, avatarUrl, is_public === 'true']
     );
 
