@@ -209,6 +209,7 @@ router.post('/call/initiate', authenticateToken, async (req, res) => {
 });
 
 // Маршрут для создания группы
+// Маршрут для создания группы
 router.post('/groups', authenticateToken, upload, async (req, res) => {
   try {
     const userId = req.user.id;
@@ -234,16 +235,19 @@ router.post('/groups', authenticateToken, upload, async (req, res) => {
       avatarUrl = s3Response.Location;
     }
 
+    // Убедимся, что description является строкой или null
+    const safeDescription = description ? String(description) : null;
+
     const [result] = await pool.query(
-      'INSERT INTO groups (creator_id, name, description, avatar_url, is_public) VALUES (?, ?, ?, ?, ?)',
-      [userId, name, description || null, avatarUrl, is_public === 'true']
+      'INSERT INTO `groups` (creator_id, name, description, avatar_url, is_public) VALUES (?, ?, ?, ?, ?)',
+      [userId, name, safeDescription, avatarUrl, is_public === 'true']
     );
 
     if (members) {
       const memberIds = JSON.parse(members);
       const memberInserts = memberIds.map(mid => [result.insertId, mid]);
       await pool.query(
-        'INSERT INTO group_members (group_id, user_id) VALUES ? ON DUPLICATE KEY UPDATE joined_at = NOW()',
+        'INSERT INTO `group_members` (group_id, user_id) VALUES ? ON DUPLICATE KEY UPDATE joined_at = NOW()',
         [memberInserts]
       );
     }
@@ -255,11 +259,10 @@ router.post('/groups', authenticateToken, upload, async (req, res) => {
       avatar_url: avatarUrl,
     });
   } catch (error) {
-    console.error('Ошибка создания группы:', error.stack);
+    console.error('Ошибка создания группы:', error.message, error.stack);
     res.status(500).json({ success: false, message: 'Ошибка сервера при создании группы', error: error.message });
   }
 });
-
 // Маршрут для получения списка групп
 router.get('/groups', authenticateToken, async (req, res) => {
   try {
