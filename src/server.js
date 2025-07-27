@@ -17,20 +17,20 @@ const server = http.createServer(app);
 
 // Middleware
 const corsOptions = {
-  origin: process.env.CORS_ORIGIN || 'https://vasyaproger-socialbek-9493.twc1.net', // Указываем домен
+  origin: process.env.CORS_ORIGIN || 'https://vasyaproger-socialbek-9493.twc1.net',
   methods: ['GET', 'POST'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true // Разрешаем куки и заголовки авторизации
+  credentials: true
 };
 app.use(cors(corsOptions));
 app.use(express.json({
-  limit: '10mb' // Ограничение размера тела запроса
+  limit: '10mb'
 }));
 
 // Инициализация таблиц
 initTables().catch(err => {
   console.error('Ошибка инициализации таблиц:', err.stack);
-  process.exit(1); // Завершение процесса при критической ошибке
+  process.exit(1);
 });
 
 // Маршруты
@@ -46,17 +46,17 @@ app.get('/', (req, res) => {
 const wss = new WebSocket.Server({
   server,
   clientTracking: true,
-  maxPayload: 10000, // Максимальный размер payload (10KB)
-  perMessageDeflate: false // Отключаем сжатие для производительности
+  maxPayload: 10000,
+  perMessageDeflate: false
 });
-const clients = new Map(); // Хранит WebSocket-клиентов по userId
-const pingIntervals = new Map(); // Хранит интервалы пинга для каждого клиента
+const clients = new Map();
+const pingIntervals = new Map();
 
 // Функция очистки клиента
 const cleanupClient = (userId) => {
   const ws = clients.get(userId.toString());
   if (ws) {
-    ws.terminate(); // Принудительное закрытие
+    ws.terminate();
     clients.delete(userId.toString());
   }
   const interval = pingIntervals.get(userId.toString());
@@ -73,33 +73,36 @@ const logWithTimestamp = (message) => {
 };
 
 wss.on('connection', (ws, req) => {
-  const url = new URL(req.url, `https://vasyaproger-socialbek-9493.twc1.net`); // Используем реальный домен
+  const url = new URL(req.url, `https://vasyaproger-socialbek-9493.twc1.net`);
   const token = url.searchParams.get('token');
 
   if (!token) {
     logWithTimestamp('Токен не предоставлен в WebSocket-запросе');
     ws.send(JSON.stringify({ success: false, message: 'Токен не предоставлен' }));
-    ws.close(1008); // Код 1008 - политика закрытия
+    ws.close(1008);
     return;
   }
 
   let userId;
   try {
     const JWT_SECRET = process.env.JWT_SECRET || 'your-secure-secure-key-please-change-this';
-    const decoded = jwt.verify(token, JWT_SECRET, { maxAge: '24h' }); // Ограничение срока действия токена
+    const decoded = jwt.verify(token, JWT_SECRET, { maxAge: '24h' });
     userId = decoded.id;
 
-    // Проверка дублирующих соединений
+    // Проверка дублирующих соединений с небольшой задержкой
     if (clients.has(userId.toString())) {
-      logWithTimestamp(`Дублирующее соединение для пользователя ${userId}, закрытие старого`);
-      cleanupClient(userId.toString());
+      logWithTimestamp(`Обнаружено дублирующее соединение для пользователя ${userId}, ожидание 2 секунды перед закрытием`);
+      setTimeout(() => {
+        if (clients.has(userId.toString()) && clients.get(userId.toString()) !== ws) {
+          cleanupClient(userId.toString());
+          logWithTimestamp(`Старое соединение для пользователя ${userId} закрыто`);
+        }
+      }, 2000); // Задержка 2 секунды
     }
 
-    // Сохраняем клиента
     clients.set(userId.toString(), ws);
     logWithTimestamp(`Пользователь ${userId} подключился к WebSocket`);
 
-    // Настройка пинга
     const pingInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.ping();
@@ -107,10 +110,11 @@ wss.on('connection', (ws, req) => {
       } else {
         cleanupClient(userId.toString());
       }
-    }, 30000); // Пинг каждые 30 секунд
+    }, 30000);
     pingIntervals.set(userId.toString(), pingInterval);
 
     ws.on('pong', () => {
+      ws.isAlive = true;
       logWithTimestamp(`Получен pong от ${userId}`);
     });
 
@@ -129,7 +133,7 @@ wss.on('connection', (ws, req) => {
         if (data.type === 'message') {
           const { senderId, receiverId, content, type } = data;
 
-          const validTypes = ['text', 'sticker', 'video', 'video_circle', 'voice']; // Добавлен 'voice'
+          const validTypes = ['text', 'sticker', 'video', 'video_circle', 'voice'];
           if (!validTypes.includes(type)) {
             ws.send(JSON.stringify({ success: false, message: 'Недопустимый тип сообщения' }));
             return;
@@ -145,7 +149,6 @@ wss.on('connection', (ws, req) => {
             return;
           }
 
-          // Экранирование content для безопасности
           const escapedContent = pool.escape(content).replace(/'/g, "''");
 
           const [result] = await pool.execute(
@@ -175,8 +178,13 @@ wss.on('connection', (ws, req) => {
         } else if (data.type === 'offer' || data.type === 'answer' || data.type === 'ice_candidate') {
           const receiverWs = clients.get(data.receiverId);
           if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
-            receiverWs.send(JSON.stringify(data));
-            logWithTimestamp(`Передано WebRTC-сообщение (${data.type}) для ${data.receiverId}`);
+            try {
+              receiverWs.send(JSON.stringify(data));
+              logWithTimestamp(`Передано WebRTC-сообщение (${data.type}) для ${data.receiverId}`);
+            } catch (e) {
+              logWithTimestamp(`Ошибка отправки WebRTC-сообщения для ${data.receiverId}: ${e.message}`);
+              ws.send(JSON.stringify({ type: 'error', message: 'Не удалось передать WebRTC-сообщение' }));
+            }
           } else {
             ws.send(JSON.stringify({ type: 'offline', receiverId: data.receiverId }));
             logWithTimestamp(`Получатель ${data.receiverId} не в сети для WebRTC`);
@@ -194,22 +202,16 @@ wss.on('connection', (ws, req) => {
 
     ws.on('close', (code, reason) => {
       cleanupClient(userId.toString());
-      logWithTimestamp(`Пользователь ${userId} отключился от WebSocket, код: ${code}, причина: ${reason}`);
+      logWithTimestamp(`Пользователь ${userId} отключился от WebSocket, код: ${code}, причина: ${reason.toString()}`);
     });
 
     ws.on('error', (error) => {
       logWithTimestamp(`Ошибка WebSocket для пользователя ${userId}:`, error.message, error.stack);
       cleanupClient(userId.toString());
-      ws.close(1011); // Код 1011 - внутренняя ошибка сервера
+      ws.close(1011);
     });
 
-    // Таймаут на случай, если клиент не отвечает на пинг
     ws.isAlive = true;
-    ws.on('pong', () => {
-      ws.isAlive = true;
-      logWithTimestamp(`Получен pong от ${userId}`);
-    });
-
     const pingTimeout = setTimeout(() => {
       if (ws.isAlive === false) {
         logWithTimestamp(`Таймаут пинга для пользователя ${userId}, соединение разорвано`);
@@ -218,7 +220,7 @@ wss.on('connection', (ws, req) => {
         return;
       }
       ws.isAlive = false;
-    }, 60000); // Таймаут 60 секунд
+    }, 180000); // Увеличено до 180 секунд для стабильности видеозвонков
 
   } catch (error) {
     logWithTimestamp('Ошибка аутентификации WebSocket:', error.message, error.stack);
