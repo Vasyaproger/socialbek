@@ -540,6 +540,48 @@ router.get('/groups/:groupId/messages', authenticateToken, async (req, res) => {
   }
 });
 
+
+
+// Search users by name
+router.get('/users/search', authenticateToken, async (req, res) => {
+  try {
+    const { query } = req.query; // Get search query from URL (e.g., ?query=Екатерина)
+    const userId = req.user.id;
+
+    if (!query || query.trim().length < 1) {
+      return res.status(400).json({ success: false, message: 'Введите поисковый запрос' });
+    }
+
+    const searchTerm = `%${query.trim()}%`; // Prepare for LIKE query
+    const [rows] = await pool.query(
+      `SELECT id, name, phone, avatar_url, age, marital_status, city 
+       FROM users 
+       WHERE id != ? AND name LIKE ?`,
+      [userId, searchTerm]
+    );
+
+    console.log(`Поиск пользователей по запросу "${query}": найдено ${rows.length} пользователей`);
+
+    res.json({
+      success: true,
+      data: rows.map((user) => ({
+        id: user.id,
+        name: user.name,
+        phone: user.phone,
+        avatar_url: user.avatar_url,
+        age: user.age,
+        maritalStatus: user.marital_status,
+        city: user.city,
+        lastMessage: 'Нет сообщений',
+        time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+        unread: 0,
+      })),
+    });
+  } catch (error) {
+    console.error('Ошибка поиска пользователей:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при поиске пользователей', error: error.message });
+  }
+});
 // Покинуть группу
 router.delete('/groups/:groupId/leave', authenticateToken, async (req, res) => {
   try {
