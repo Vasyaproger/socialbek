@@ -1,8 +1,8 @@
-const bcrypt = require('bcrypt');
+
 const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
 
-exports.register = async (req, res) => {
+const register = async (req, res) => {
   try {
     const { name, phone, password, serviceAgreement, age, city, country, marital_status } = req.body;
 
@@ -39,7 +39,7 @@ exports.register = async (req, res) => {
 
     // Hash password
     const saltRounds = 10;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
+    const hashedPassword = await bcrypt.hash(password, saltRounds); // Ошибка: bcrypt не определён
 
     // Insert user into database
     const [result] = await pool.query(
@@ -63,7 +63,7 @@ exports.register = async (req, res) => {
   }
 };
 
-exports.login = async (req, res) => {
+const login = async (req, res) => {
   try {
     const { phone, password } = req.body;
 
@@ -87,7 +87,7 @@ exports.login = async (req, res) => {
     const user = users[0];
 
     // Verify password
-    const isMatch = await bcrypt.compare(password, user.password);
+    const isMatch = await bcrypt.compare(password, user.password); // Ошибка: bcrypt не определён
     if (!isMatch) {
       return res.status(400).json({
         success: false,
