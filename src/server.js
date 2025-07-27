@@ -9,7 +9,7 @@ const messageRoutes = require('./routes/message.routes');
 const { initTables } = require('./models/user.model');
 const pool = require('./config/database');
 
-// Загружаем переменные окружения
+// Load environment variables
 dotenv.config();
 
 const app = express();
@@ -25,28 +25,27 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 
-// Проверка наличия JWT_SECRET
+// Check for JWT_SECRET (optional for token-based auth)
 if (!process.env.JWT_SECRET) {
-  console.error('Ошибка: JWT_SECRET не задан в файле .env');
-  process.exit(1);
+  console.warn('Warning: JWT_SECRET not set in .env file. Token authentication disabled.');
 }
 
-// Инициализация таблиц
+// Initialize database tables
 initTables().catch(err => {
-  console.error('Ошибка инициализации таблиц:', err.stack);
+  console.error('Error initializing tables:', err.stack);
   process.exit(1);
 });
 
-// Маршруты
+// Routes
 app.use('/api', userRoutes);
 app.use('/api', messageRoutes);
 
-// Базовый маршрут
+// Basic route
 app.get('/', (req, res) => {
-  res.send(`Привет, это твой Node.js бэкенд на домене vasyaproger-socialbek-9493.twc1.net!`);
+  res.send(`Hello, this is your Node.js backend on vasyaproger-socialbek-9493.twc1.net!`);
 });
 
-// WebSocket-сервер
+// WebSocket server
 const wss = new WebSocket.Server({
   server,
   clientTracking: true,
@@ -56,165 +55,27 @@ const wss = new WebSocket.Server({
 const clients = new Map();
 const pingIntervals = new Map();
 
-// Функция очистки клиента
-const cleanupClient = (userId) => {
-  const ws = clients.get(userId.toString());
+// Cleanup client function
+const cleanupClient = (clientId) => {
+  const ws = clients.get(clientId);
   if (ws) {
     ws.terminate();
-    clients.delete(userId.toString());
+    clients.delete(clientId);
   }
-  const interval = pingIntervals.get(userId.toString());
+  const interval = pingIntervals.get(clientId);
   if (interval) {
     clearInterval(interval);
-    pingIntervals.delete(userId.toString());
+    pingIntervals.delete(clientId);
   }
 };
 
-// Логирование с временной меткой
+// Logging with timestamp
 const logWithTimestamp = (message) => {
   const now = new Date().toLocaleString('ru-RU', { timeZone: 'Asia/Almaty', hour12: false });
   console.log(`[${now}] ${message}`);
 };
 
-wss.on('connection', (ws, req) => {
-  logWithTimestamp(`Получен WebSocket-запрос с URL: ${req.url}`);
-  const url = new URL(req.url, `https://vasyaproger-socialbek-9493.twc1.net`);
-  const token = url.searchParams.get('token');
-
-  if (!token) {
-    logWithTimestamp('Токен не предоставлен в WebSocket-запросе');
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ success: false, message: 'Токен не предоставлен' }));
-      ws.close(1008, 'Токен не предоставлен');
-    }
-    return;
-  }
-
-  let userId;
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET, { maxAge: '24h' });
-    userId = decoded.id;
-
-    // Проверка дублирующих соединений
-    if (clients.has(userId.toString())) {
-      logWithTimestamp(`Обнаружено дублирующее соединение для пользователя ${userId}, ожидание 2 секунды перед закрытием`);
-      setTimeout(() => {
-        if (clients.has(userId.toString()) && clients.get(userId.toString()) !== ws) {
-          cleanupClient(userId.toString());
-          logWithTimestamp(`Старое соединение для пользователя ${userId} закрыто`);
-        }
-      }, 2000);
-    }
-
-    clients.set(userId.toString(), ws);
-    logWithTimestamp(`Пользователь ${userId} подключился к WebSocket`);
-
-    // Отправка статуса всем клиентам
-    broadcastOnlineStatus(userId, true);
-
-    // Пинг для проверки соединения
-    const pingInterval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.ping();
-        logWithTimestamp(`Отправлен ping пользователю ${userId}`);
-      } else {
-        logWithTimestamp(`Соединение с пользователем ${userId} закрыто, очистка`);
-        cleanupClient(userId.toString());
-      }
-    }, 30000);
-    pingIntervals.set(userId.toString(), pingInterval);
-
-    ws.on('pong', () => {
-      ws.isAlive = true;
-      logWithTimestamp(`Получен pong от пользователя ${userId}`);
-    });
-
-    ws.on('message', async (message) => {
-      try {
-        if (ws.readyState !== WebSocket.OPEN) return;
-
-        if (Buffer.byteLength(message) > 10000) {
-          ws.send(JSON.stringify({ success: false, message: 'Сообщение слишком большое' }));
-          return;
-        }
-
-        const data = JSON.parse(message.toString());
-        logWithTimestamp(`Получено WebSocket-сообщение от ${userId}: ${JSON.stringify(data)}`);
-
-        if (data.type === 'message') {
-          const { senderId, receiverId, content, type } = data;
-          // Предполагается, что здесь код для сохранения сообщения в БД и пересылки
-          // Оставляем как есть, так как он не указан полностью
-        } else if (data.type === 'offer' || data.type === 'answer' || data.type === 'ice_candidate') {
-          const receiverWs = clients.get(data.receiverId?.toString());
-          if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
-            receiverWs.send(JSON.stringify(data));
-            logWithTimestamp(`Передано WebRTC-сообщение (${data.type}) для ${data.receiverId}`);
-          } else {
-            ws.send(JSON.stringify({ type: 'offline', receiverId: data.receiverId }));
-            logWithTimestamp(`Получатель ${data.receiverId} не в сети для WebRTC`);
-          }
-        } else if (data.type === 'online_status') {
-          const receiverId = data.receiverId?.toString();
-          const receiverWs = clients.get(receiverId);
-          if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
-            receiverWs.send(JSON.stringify({
-              type: 'online_status',
-              isOnline: true,
-              senderId: receiverId,
-            }));
-          } else {
-            ws.send(JSON.stringify({
-              type: 'online_status',
-              isOnline: false,
-              senderId: receiverId,
-            }));
-          }
-        } else {
-          ws.send(JSON.stringify({ success: false, message: 'Неизвестный тип сообщения' }));
-        }
-      } catch (error) {
-        logWithTimestamp(`Ошибка обработки WebSocket-сообщения от ${userId}: ${error.message}`);
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ success: false, message: 'Ошибка обработки сообщения' }));
-        }
-      }
-    });
-
-    ws.on('close', (code, reason) => {
-      logWithTimestamp(`Пользователь ${userId} отключился от WebSocket, код: ${code}, причина: ${reason.toString()}`);
-      cleanupClient(userId.toString());
-      broadcastOnlineStatus(userId, false);
-    });
-
-    ws.on('error', (error) => {
-      logWithTimestamp(`Ошибка WebSocket для пользователя ${userId}: ${error.message}`);
-      cleanupClient(userId.toString());
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.close(1011, 'Внутренняя ошибка');
-      }
-    });
-
-    ws.isAlive = true;
-    const pingTimeout = setTimeout(() => {
-      if (ws.isAlive === false) {
-        logWithTimestamp(`Таймаут пинга для пользователя ${userId}, соединение разорвано`);
-        cleanupClient(userId.toString());
-        ws.terminate();
-      }
-      ws.isAlive = false;
-    }, 180000);
-
-  } catch (error) {
-    logWithTimestamp(`Ошибка аутентификации WebSocket: ${error.message}`);
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ success: false, message: 'Недействительный токен' }));
-      ws.close(1008, 'Недействительный токен');
-    }
-  }
-});
-
-// Отправка статуса всем клиентам
+// Broadcast online status
 function broadcastOnlineStatus(userId, isOnline) {
   clients.forEach((client, id) => {
     if (client.readyState === WebSocket.OPEN) {
@@ -227,32 +88,165 @@ function broadcastOnlineStatus(userId, isOnline) {
   });
 }
 
-// Обработка ошибок сервера
+wss.on('connection', (ws, req) => {
+  logWithTimestamp(`Received WebSocket request with URL: ${req.url}`);
+  const url = new URL(req.url, `https://vasyaproger-socialbek-9493.twc1.net`);
+  const token = url.searchParams.get('token');
+  let userId = `anonymous-${Math.random().toString(36).slice(2)}`; // Default anonymous ID
+
+  // Optional token verification
+  if (token && process.env.JWT_SECRET) {
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET, { maxAge: '24h' });
+      userId = decoded.id.toString();
+      logWithTimestamp(`Authenticated user ${userId} connected via token`);
+    } catch (error) {
+      logWithTimestamp(`Invalid token provided: ${error.message}`);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ success: false, message: 'Invalid token, proceeding as anonymous' }));
+      }
+    }
+  } else {
+    logWithTimestamp(`No token provided, connecting as ${userId}`);
+  }
+
+  // Handle duplicate connections
+  if (clients.has(userId)) {
+    logWithTimestamp(`Duplicate connection for ${userId}, closing old connection after 2s`);
+    setTimeout(() => {
+      if (clients.has(userId) && clients.get(userId) !== ws) {
+        cleanupClient(userId);
+        logWithTimestamp(`Old connection for ${userId} closed`);
+      }
+    }, 2000);
+  }
+
+  clients.set(userId, ws);
+  logWithTimestamp(`${userId} connected to WebSocket`);
+
+  // Broadcast online status
+  broadcastOnlineStatus(userId, true);
+
+  // Heartbeat mechanism
+  ws.isAlive = true;
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.ping();
+      logWithTimestamp(`Sent ping to ${userId}`);
+    } else {
+      logWithTimestamp(`Connection with ${userId} closed, cleaning up`);
+      cleanupClient(userId);
+    }
+  }, 30000);
+  pingIntervals.set(userId, pingInterval);
+
+  ws.on('pong', () => {
+    ws.isAlive = true;
+    logWithTimestamp(`Received pong from ${userId}`);
+  });
+
+  ws.on('message', async (message) => {
+    try {
+      if (ws.readyState !== WebSocket.OPEN) return;
+
+      if (Buffer.byteLength(message) > 10000) {
+        ws.send(JSON.stringify({ success: false, message: 'Message too large' }));
+        return;
+      }
+
+      const data = JSON.parse(message.toString());
+      logWithTimestamp(`Received WebSocket message from ${userId}: ${JSON.stringify(data)}`);
+
+      if (data.type === 'message') {
+        const { senderId, receiverId, content, type } = data;
+        // Handle message saving and forwarding (unchanged)
+      } else if (data.type === 'offer' || data.type === 'answer' || data.type === 'ice_candidate') {
+        const receiverWs = clients.get(data.receiverId?.toString());
+        if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
+          receiverWs.send(JSON.stringify(data));
+          logWithTimestamp(`Forwarded WebRTC message (${data.type}) to ${data.receiverId}`);
+        } else {
+          ws.send(JSON.stringify({ type: 'offline', receiverId: data.receiverId }));
+          logWithTimestamp(`Receiver ${data.receiverId} offline for WebRTC`);
+        }
+      } else if (data.type === 'online_status') {
+        const receiverId = data.receiverId?.toString();
+        const receiverWs = clients.get(receiverId);
+        if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
+          receiverWs.send(JSON.stringify({
+            type: 'online_status',
+            isOnline: true,
+            senderId: receiverId,
+          }));
+        } else {
+          ws.send(JSON.stringify({
+            type: 'online_status',
+            isOnline: false,
+            senderId: receiverId,
+          }));
+        }
+      } else {
+        ws.send(JSON.stringify({ success: false, message: 'Unknown message type' }));
+      }
+    } catch (error) {
+      logWithTimestamp(`Error processing WebSocket message from ${userId}: ${error.message}`);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ success: false, message: 'Error processing message' }));
+      }
+    }
+  });
+
+  ws.on('close', (code, reason) => {
+    logWithTimestamp(`${userId} disconnected from WebSocket, code: ${code}, reason: ${reason.toString()}`);
+    cleanupClient(userId);
+    broadcastOnlineStatus(userId, false);
+  });
+
+  ws.on('error', (error) => {
+    logWithTimestamp(`WebSocket error for ${userId}: ${error.message}`);
+    cleanupClient(userId);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.close(1011, 'Internal error');
+    }
+  });
+
+  // Handle ping timeout
+  const pingTimeout = setTimeout(() => {
+    if (ws.isAlive === false) {
+      logWithTimestamp(`Ping timeout for ${userId}, connection terminated`);
+      cleanupClient(userId);
+      ws.terminate();
+    }
+    ws.isAlive = false;
+  }, 180000);
+});
+
+// Server error handling
 server.on('error', (error) => {
-  logWithTimestamp(`Ошибка сервера: ${error.message}`);
+  logWithTimestamp(`Server error: ${error.message}`);
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  logWithTimestamp('Получен SIGTERM, завершение работы...');
+  logWithTimestamp('Received SIGTERM, shutting down...');
   wss.clients.forEach((client) => client.close());
   server.close(() => {
-    logWithTimestamp('Сервер остановлен');
+    logWithTimestamp('Server stopped');
     process.exit(0);
   });
 });
 
 process.on('SIGINT', () => {
-  logWithTimestamp('Получен SIGINT, завершение работы...');
+  logWithTimestamp('Received SIGINT, shutting down...');
   wss.clients.forEach((client) => client.close());
   server.close(() => {
-    logWithTimestamp('Сервер остановлен');
+    logWithTimestamp('Server stopped');
     process.exit(0);
   });
 });
 
-// Запуск сервера
+// Start server
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  logWithTimestamp(`Сервер запущен на порту ${PORT} для домена vasyaproger-socialbek-9493.twc1.net`);
+  logWithTimestamp(`Server started on port ${PORT} for domain vasyaproger-socialbek-9493.twc1.net`);
 });
