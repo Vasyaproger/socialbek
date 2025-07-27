@@ -37,27 +37,17 @@ const s3 = new AWS.S3({
   s3ForcePathStyle: true,
 });
 
-// Конфигурация Multer для поддержки всех форматов, включая голосовые сообщения
+// Конфигурация Multer
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 }, // Увеличено до 50 МБ
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50 МБ
   fileFilter: (req, file, cb) => {
     const fileTypes = /\.(jpeg|jpg|png|gif|webp|mp4|mov|avi|mkv|m4a|mp3|wav|opus|aac)$/i;
     const extname = fileTypes.test(path.extname(file.originalname).toLowerCase());
     const mimeTypes = [
-      'image/jpeg',
-      'image/png',
-      'image/gif',
-      'image/webp',
-      'video/mp4',
-      'video/quicktime',
-      'video/x-msvideo',
-      'video/x-matroska',
-      'audio/mp4',
-      'audio/mpeg',
-      'audio/wav',
-      'audio/opus',
-      'audio/aac',
+      'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+      'video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska',
+      'audio/mp4', 'audio/mpeg', 'audio/wav', 'audio/opus', 'audio/aac',
       'application/octet-stream',
     ];
     const mimetype = mimeTypes.includes(file.mimetype);
@@ -74,7 +64,7 @@ const upload = multer({
   { name: 'file', maxCount: 1 },
   { name: 'image', maxCount: 1 },
   { name: 'video', maxCount: 1 },
-  { name: 'voice', maxCount: 1 }, // Добавлено для голосовых сообщений
+  { name: 'voice', maxCount: 1 },
 ]);
 
 // Инициализация базы данных
@@ -111,8 +101,11 @@ const initializeDatabase = async () => {
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
-    `); // Добавлена таблица для голосовых сообщений
-    console.log('Таблицы stories, story_views и voice_messages готовы');
+    `);
+    await connection.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(255) NULL
+    `);
+    console.log('Таблицы stories, story_views, voice_messages и колонка avatar_url готовы');
 
     connection.release();
   } catch (err) {
@@ -315,12 +308,138 @@ router.get('/stories/:id/views', authenticateToken, async (req, res) => {
   }
 });
 
+// Маршрут для обновления профиля
+router.put('/users/profile', authenticateToken, async (req, res) => {
+  try {
+    const { name, phone, password } = req.body;
+    const userId = req.user.id;
+
+    const updates = {};
+    if (name) updates.name = name;
+    if (phone) updates.phone = phone;
+    if (password) {
+      const bcrypt = require('bcrypt');
+      updates.password = await bcrypt.hash(password, 10);
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, message: 'Нет данных для обновления' });
+    }
+
+    const fields = Object.keys(updates).map(key => `${key} = ?`).join(', ');
+    const values = Object.values(updates);
+
+    await pool.query(
+      `UPDATE users SET ${fields} WHERE id = ?`,
+      [...values, userId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Профиль успешно обновлен',
+    });
+  } catch (error) {
+    console.error('Ошибка обновления профиля:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при обновлении профиля', error: error.message });
+  }
+});
+
+// Маршрут для загрузки аватара
+router.post('/upload/avatar', authenticateToken, (req, res, next) => {
+  upload(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      console.error('Ошибка Multer:', err.message, err.stack);
+      return res.status(400).json({ success: false, message: `Ошибка Multer: ${err.message}` });
+    } else if (err) {
+      console.error('Ошибка фильтрации файла:', err.message);
+      return res.status(400).json({ success: false, message: err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const file = req.files['image']?.[0];
+
+    if (!file) {
+      console.error('Файл аватара не предоставлен:', req.body, req.headers);
+      return res.status(400).json({ success: false, message: 'Файл аватара не предоставлен' });
+    }
+
+    const fileName = `${userId}/avatar_${Date.now()}${path.extname(file.originalname)}`;
+    const bucketName = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+
+    const params = {
+      Bucket: bucketName,
+      Key: fileName,
+      Body: file.buffer,
+      ContentType: file.mimetype,
+      ACL: 'public-read',
+    };
+
+    const s3Response = await s3.upload(params).promise();
+    const avatarUrl = s3Response.Location;
+    console.log('Аватар загружен в S3:', avatarUrl);
+
+    await pool.query(
+      'UPDATE users SET avatar_url = ? WHERE id = ?',
+      [avatarUrl, userId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Аватар успешно загружен',
+      avatar_url: avatarUrl,
+    });
+  } catch (error) {
+    console.error('Ошибка при загрузке аватара:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при загрузке аватара', error: error.message });
+  }
+});
+
+// Маршрут для удаления аватара
+router.delete('/delete/avatar', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const [user] = await pool.query(
+      'SELECT avatar_url FROM users WHERE id = ?',
+      [userId]
+    );
+
+    if (user.length === 0 || !user[0].avatar_url) {
+      return res.status(400).json({ success: false, message: 'Аватар не найден' });
+    }
+
+    const fileName = user[0].avatar_url.split('/').slice(-2).join('/');
+    const bucketName = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+
+    await s3.deleteObject({
+      Bucket: bucketName,
+      Key: fileName,
+    }).promise();
+
+    await pool.query(
+      'UPDATE users SET avatar_url = NULL WHERE id = ?',
+      [userId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Аватар успешно удален',
+    });
+  } catch (error) {
+    console.error('Ошибка при удалении аватара:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при удалении аватара', error: error.message });
+  }
+});
+
 // Остальные маршруты
 router.post('/register', userController.register);
 router.post('/login', userController.login);
 router.get('/users', authenticateToken, async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT id, name, phone FROM users WHERE id != ?', [req.user.id]);
+    const [rows] = await pool.query('SELECT id, name, phone, avatar_url FROM users WHERE id != ?', [req.user.id]);
     console.log('Получены пользователи:', rows.length);
     res.json({
       success: true,
@@ -328,6 +447,7 @@ router.get('/users', authenticateToken, async (req, res) => {
         id: user.id,
         name: user.name,
         phone: user.phone,
+        avatar_url: user.avatar_url,
         lastMessage: 'Нет сообщений',
         time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
         unread: 0,
@@ -341,7 +461,7 @@ router.get('/users', authenticateToken, async (req, res) => {
 
 router.get('/user/profile', authenticateToken, async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT name, phone FROM users WHERE id = ?', [req.user.id]);
+    const [rows] = await pool.query('SELECT name, phone, avatar_url FROM users WHERE id = ?', [req.user.id]);
     if (rows.length === 0) {
       console.error('Пользователь не найден, id:', req.user.id);
       return res.status(404).json({ success: false, message: 'Пользователь не найден' });
@@ -353,6 +473,7 @@ router.get('/user/profile', authenticateToken, async (req, res) => {
       data: {
         name: user.name,
         phone: user.phone,
+        avatar_url: user.avatar_url,
       },
     });
   } catch (error) {
@@ -360,5 +481,3 @@ router.get('/user/profile', authenticateToken, async (req, res) => {
     res.status(500).json({ success: false, message: 'Ошибка сервера при получении профиля', error: error.message });
   }
 });
-
-module.exports = router;
