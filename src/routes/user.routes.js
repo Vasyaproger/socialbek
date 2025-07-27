@@ -86,15 +86,26 @@ const initializeDatabase = async () => {
     const connection = await pool.getConnection();
     console.log('Подключение к базе данных успешно');
 
-    // Обновление таблицы users
-    await connection.query(`
-      ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(255) DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS age INT DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS city VARCHAR(100) DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS country VARCHAR(100) DEFAULT NULL,
-      ADD COLUMN IF NOT EXISTS marital_status VARCHAR(50) DEFAULT NULL
-    `);
+    // Проверяем существование столбцов и добавляем их по одному, если отсутствуют
+    const [columns] = await connection.query('SHOW COLUMNS FROM users');
+    const columnNames = columns.map(col => col.Field);
+
+    const newColumns = [
+      { name: 'avatar_url', type: 'VARCHAR(255) DEFAULT NULL' },
+      { name: 'age', type: 'INT DEFAULT NULL' },
+      { name: 'city', type: 'VARCHAR(100) DEFAULT NULL' },
+      { name: 'country', type: 'VARCHAR(100) DEFAULT NULL' },
+      { name: 'marital_status', type: 'VARCHAR(50) DEFAULT NULL' },
+    ];
+
+    for (const col of newColumns) {
+      if (!columnNames.includes(col.name)) {
+        await connection.query(`ALTER TABLE users ADD COLUMN ${col.name} ${col.type}`);
+        console.log(`Столбец ${col.name} добавлен в таблицу users`);
+      } else {
+        console.log(`Столбец ${col.name} уже существует в таблице users`);
+      }
+    }
 
     // Создание таблицы stories
     await connection.query(`
@@ -106,6 +117,7 @@ const initializeDatabase = async () => {
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
+    console.log('Таблица stories создана или уже существует');
 
     // Создание таблицы story_views
     await connection.query(`
@@ -119,6 +131,7 @@ const initializeDatabase = async () => {
         UNIQUE(story_id, user_id)
       )
     `);
+    console.log('Таблица story_views создана или уже существует');
 
     // Создание таблицы groups
     await connection.query(`
@@ -133,6 +146,7 @@ const initializeDatabase = async () => {
         FOREIGN KEY (creator_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
+    console.log('Таблица groups создана или уже существует');
 
     // Создание таблицы group_members
     await connection.query(`
@@ -146,6 +160,7 @@ const initializeDatabase = async () => {
         UNIQUE(group_id, user_id)
       )
     `);
+    console.log('Таблица group_members создана или уже существует');
 
     // Создание таблицы voice_messages
     await connection.query(`
@@ -157,6 +172,7 @@ const initializeDatabase = async () => {
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
+    console.log('Таблица voice_messages создана или уже существует');
 
     // Создание таблицы group_messages
     await connection.query(`
@@ -172,7 +188,7 @@ const initializeDatabase = async () => {
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
-    console.log('Таблица group_messages создана');
+    console.log('Таблица group_messages создана или уже существует');
 
     // Создание таблицы calls
     await connection.query(`
@@ -187,9 +203,9 @@ const initializeDatabase = async () => {
         FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
+    console.log('Таблица calls создана или уже существует');
 
-    console.log('Таблицы users, stories, story_views, groups, group_members, voice_messages и calls готовы');
-
+    console.log('Все таблицы успешно инициализированы');
     connection.release();
   } catch (err) {
     console.error('Ошибка инициализации базы данных:', err.message, err.stack);
@@ -235,7 +251,6 @@ router.get('/groups/:id', authenticateToken, async (req, res) => {
     const groupId = req.params.id;
     const userId = req.user.id;
 
-    // Проверяем, существует ли группа и является ли пользователь её участником
     const [group] = await pool.query(
       `SELECT g.id, g.name, g.description, g.avatar_url, g.is_public, g.creator_id,
               COUNT(gm.user_id) as member_count
@@ -255,7 +270,6 @@ router.get('/groups/:id', authenticateToken, async (req, res) => {
       [groupId, userId]
     );
 
-    // Проверяем доступ для закрытых групп
     if (!group[0].is_public && isMember.length === 0 && group[0].creator_id !== userId) {
       return res.status(403).json({ success: false, message: 'Доступ к закрытой группе запрещён' });
     }
@@ -287,7 +301,6 @@ router.put('/groups/:id', authenticateToken, upload, async (req, res) => {
     const { name, description, is_public } = req.body;
     const file = req.files['avatar']?.[0];
 
-    // Проверяем, является ли пользователь создателем группы
     const [group] = await pool.query(
       'SELECT creator_id, avatar_url FROM groups WHERE id = ?',
       [groupId]
@@ -315,7 +328,6 @@ router.put('/groups/:id', authenticateToken, upload, async (req, res) => {
       const s3Response = await s3.upload(params).promise();
       avatarUrl = s3Response.Location;
 
-      // Удаляем старый аватар, если он есть
       if (group[0].avatar_url) {
         const oldFileName = group[0].avatar_url.split('/').slice(-2).join('/');
         await s3.deleteObject({ Bucket: bucketName, Key: oldFileName }).promise();
@@ -367,7 +379,6 @@ router.delete('/groups/:groupId/members/:userId', authenticateToken, async (req,
     const { groupId, userId } = req.params;
     const creatorId = req.user.id;
 
-    // Проверяем, является ли пользователь создателем группы
     const [group] = await pool.query(
       'SELECT creator_id FROM groups WHERE id = ?',
       [groupId]
@@ -385,7 +396,6 @@ router.delete('/groups/:groupId/members/:userId', authenticateToken, async (req,
       return res.status(400).json({ success: false, message: 'Создатель не может исключить себя' });
     }
 
-    // Проверяем, является ли пользователь участником группы
     const [member] = await pool.query(
       'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
       [groupId, userId]
@@ -418,7 +428,6 @@ router.post('/groups/:groupId/messages', authenticateToken, upload, async (req, 
     const { content } = req.body;
     const file = req.files['image']?.[0] || req.files['video']?.[0];
 
-    // Проверяем, существует ли группа и является ли пользователь её участником
     const [group] = await pool.query(
       'SELECT creator_id, is_public FROM groups WHERE id = ?',
       [groupId]
@@ -437,7 +446,6 @@ router.post('/groups/:groupId/messages', authenticateToken, upload, async (req, 
       return res.status(403).json({ success: false, message: 'Доступ к отправке сообщений запрещён' });
     }
 
-    // В закрытой группе только создатель может отправлять сообщения
     if (!group[0].is_public && group[0].creator_id !== userId) {
       return res.status(403).json({ success: false, message: 'Только создатель может отправлять сообщения в закрытой группе' });
     }
@@ -489,7 +497,6 @@ router.get('/groups/:groupId/messages', authenticateToken, async (req, res) => {
     const groupId = req.params.groupId;
     const userId = req.user.id;
 
-    // Проверяем, существует ли группа и является ли пользователь её участником
     const [group] = await pool.query(
       'SELECT is_public, creator_id FROM groups WHERE id = ?',
       [groupId]
@@ -546,11 +553,16 @@ router.get('/users/search', authenticateToken, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Введите поисковый запрос' });
     }
 
+    // Проверяем наличие столбцов
+    const [columns] = await pool.query('SHOW COLUMNS FROM users');
+    const columnNames = columns.map(col => col.Field);
+    const selectFields = ['id', 'name', 'phone', 'avatar_url'];
+    const optionalFields = ['age', 'city', 'country', 'marital_status'];
+    const availableFields = selectFields.concat(optionalFields.filter(field => columnNames.includes(field)));
+
     const searchTerm = `%${query.trim()}%`;
     const [rows] = await pool.query(
-      `SELECT id, name, phone, avatar_url, age, city, country, marital_status
-       FROM users 
-       WHERE id != ? AND name LIKE ?`,
+      `SELECT ${availableFields.join(', ')} FROM users WHERE id != ? AND name LIKE ?`,
       [userId, searchTerm]
     );
 
@@ -563,10 +575,10 @@ router.get('/users/search', authenticateToken, async (req, res) => {
         name: user.name,
         phone: user.phone,
         avatar_url: user.avatar_url,
-        age: user.age,
-        city: user.city,
-        country: user.country,
-        marital_status: user.marital_status,
+        age: user.age || null,
+        city: user.city || null,
+        country: user.country || null,
+        marital_status: user.marital_status || null,
         lastMessage: 'Нет сообщений',
         time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
         unread: 0,
@@ -584,7 +596,6 @@ router.delete('/groups/:groupId/leave', authenticateToken, async (req, res) => {
     const groupId = req.params.groupId;
     const userId = req.user.id;
 
-    // Проверяем, существует ли группа
     const [group] = await pool.query(
       'SELECT creator_id FROM groups WHERE id = ?',
       [groupId]
@@ -594,12 +605,10 @@ router.delete('/groups/:groupId/leave', authenticateToken, async (req, res) => {
       return res.status(404).json({ success: false, message: 'Группа не найдена' });
     }
 
-    // Создатель не может покинуть группу
     if (group[0].creator_id === userId) {
       return res.status(403).json({ success: false, message: 'Создатель не может покинуть группу' });
     }
 
-    // Проверяем, является ли пользователь участником группы
     const [member] = await pool.query(
       'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
       [groupId, userId]
@@ -669,20 +678,17 @@ router.post('/groups', authenticateToken, upload, async (req, res) => {
         return res.status(400).json({ success: false, message: 'Некорректный формат members' });
       }
 
-      // Validate member IDs
       const [existingUsers] = await pool.query(
         'SELECT id FROM users WHERE id IN (?)',
         [memberIds]
       );
       const validMemberIds = existingUsers.map(user => user.id);
 
-      // Filter out invalid member IDs
       const invalidMemberIds = memberIds.filter(mid => !validMemberIds.includes(mid));
       if (invalidMemberIds.length > 0) {
         console.warn('Некоторые user_id не существуют:', invalidMemberIds);
       }
 
-      // Insert only valid member IDs
       const memberInserts = validMemberIds.map(mid => [result.insertId, mid]);
       if (memberInserts.length > 0) {
         await pool.query(
@@ -1073,10 +1079,17 @@ router.get('/stories/:id/views', authenticateToken, async (req, res) => {
 // Маршрут для получения профиля пользователя
 router.get('/user/profile', authenticateToken, async (req, res) => {
   try {
+    const [columns] = await pool.query('SHOW COLUMNS FROM users');
+    const columnNames = columns.map(col => col.Field);
+    const selectFields = ['id', 'name', 'phone', 'avatar_url'];
+    const optionalFields = ['age', 'city', 'country', 'marital_status'];
+    const availableFields = selectFields.concat(optionalFields.filter(field => columnNames.includes(field)));
+
     const [rows] = await pool.query(
-      'SELECT id, name, phone, avatar_url, age, city, country, marital_status FROM users WHERE id = ?',
+      `SELECT ${availableFields.join(', ')} FROM users WHERE id = ?`,
       [req.user.id]
     );
+
     if (rows.length === 0) {
       console.error('Пользователь не найден, id:', req.user.id);
       return res.status(404).json({ success: false, message: 'Пользователь не найден' });
@@ -1090,10 +1103,10 @@ router.get('/user/profile', authenticateToken, async (req, res) => {
         name: user.name,
         phone: user.phone,
         avatar_url: user.avatar_url,
-        age: user.age,
-        city: user.city,
-        country: user.country,
-        marital_status: user.marital_status,
+        age: user.age || null,
+        city: user.city || null,
+        country: user.country || null,
+        marital_status: user.marital_status || null,
       },
     });
   } catch (error) {
@@ -1180,10 +1193,17 @@ router.post('/login', userController.login);
 // Маршрут для получения списка пользователей
 router.get('/users', authenticateToken, async (req, res) => {
   try {
+    const [columns] = await pool.query('SHOW COLUMNS FROM users');
+    const columnNames = columns.map(col => col.Field);
+    const selectFields = ['id', 'name', 'phone', 'avatar_url'];
+    const optionalFields = ['age', 'city', 'country', 'marital_status'];
+    const availableFields = selectFields.concat(optionalFields.filter(field => columnNames.includes(field)));
+
     const [rows] = await pool.query(
-      'SELECT id, name, phone, avatar_url, age, city, country, marital_status FROM users WHERE id != ?',
+      `SELECT ${availableFields.join(', ')} FROM users WHERE id != ?`,
       [req.user.id]
     );
+
     console.log('Получены пользователи:', rows.length);
     res.json({
       success: true,
@@ -1192,10 +1212,10 @@ router.get('/users', authenticateToken, async (req, res) => {
         name: user.name,
         phone: user.phone,
         avatar_url: user.avatar_url,
-        age: user.age,
-        city: user.city,
-        country: user.country,
-        marital_status: user.marital_status,
+        age: user.age || null,
+        city: user.city || null,
+        country: user.country || null,
+        marital_status: user.marital_status || null,
         lastMessage: 'Нет сообщений',
         time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
         unread: 0,
