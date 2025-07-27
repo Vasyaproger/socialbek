@@ -1,4 +1,3 @@
-
 const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/user.controller');
@@ -38,12 +37,12 @@ const s3 = new AWS.S3({
   s3ForcePathStyle: true,
 });
 
-// Конфигурация Multer для поддержки всех форматов
+// Конфигурация Multer для поддержки всех форматов, включая голосовые сообщения
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 }, // Увеличено до 50 МБ
   fileFilter: (req, file, cb) => {
-    const fileTypes = /\.(jpeg|jpg|png|gif|webp|mp4|mov|avi|mkv|m4a|mp3|wav)$/i;
+    const fileTypes = /\.(jpeg|jpg|png|gif|webp|mp4|mov|avi|mkv|m4a|mp3|wav|opus|aac)$/i;
     const extname = fileTypes.test(path.extname(file.originalname).toLowerCase());
     const mimeTypes = [
       'image/jpeg',
@@ -57,6 +56,8 @@ const upload = multer({
       'audio/mp4',
       'audio/mpeg',
       'audio/wav',
+      'audio/opus',
+      'audio/aac',
       'application/octet-stream',
     ];
     const mimetype = mimeTypes.includes(file.mimetype);
@@ -66,13 +67,14 @@ const upload = multer({
       return cb(null, true);
     } else {
       console.error('Неподдерживаемый тип файла:', file.originalname, file.mimetype);
-      cb(new Error('Разрешены только изображения (jpg, png, gif, webp), видео (mp4, mov, avi, mkv) и аудио (m4a, mp3, wav)'));
+      cb(new Error('Разрешены только изображения (jpg, png, gif, webp), видео (mp4, mov, avi, mkv) и аудио (m4a, mp3, wav, opus, aac)'));
     }
   },
 }).fields([
   { name: 'file', maxCount: 1 },
   { name: 'image', maxCount: 1 },
   { name: 'video', maxCount: 1 },
+  { name: 'voice', maxCount: 1 }, // Добавлено для голосовых сообщений
 ]);
 
 // Инициализация базы данных
@@ -101,7 +103,16 @@ const initializeDatabase = async () => {
         UNIQUE(story_id, user_id)
       )
     `);
-    console.log('Таблицы stories и story_views готовы');
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS voice_messages (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        file_path VARCHAR(255) NOT NULL,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `); // Добавлена таблица для голосовых сообщений
+    console.log('Таблицы stories, story_views и voice_messages готовы');
 
     connection.release();
   } catch (err) {
@@ -159,11 +170,67 @@ router.post('/stories', authenticateToken, (req, res, next) => {
       success: true,
       message: 'История успешно добавлена',
       fileUrl: fileUrl,
-      id: result.insertId, // Возвращаем ID новой истории
+      id: result.insertId,
     });
   } catch (error) {
     console.error('Ошибка при загрузке истории:', error.stack);
     res.status(500).json({ success: false, message: 'Ошибка сервера при загрузке истории', error: error.message });
+  }
+});
+
+// Маршрут для загрузки голосовых сообщений
+router.post('/voice-messages', authenticateToken, (req, res, next) => {
+  upload(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      console.error('Ошибка Multer:', err.message, err.stack);
+      return res.status(400).json({ success: false, message: `Ошибка Multer: ${err.message}` });
+    } else if (err) {
+      console.error('Ошибка фильтрации файла:', err.message);
+      return res.status(400).json({ success: false, message: err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const file = req.files['voice']?.[0];
+
+    if (!file) {
+      console.error('Голосовое сообщение не предоставлено в запросе:', req.body, req.headers);
+      return res.status(400).json({ success: false, message: 'Голосовое сообщение не предоставлено' });
+    }
+
+    console.log('Загружаемое голосовое сообщение:', file.originalname, file.mimetype, file.size);
+
+    const fileName = `${userId}/voice_${Date.now()}${path.extname(file.originalname)}`;
+    const bucketName = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+
+    const params = {
+      Bucket: bucketName,
+      Key: fileName,
+      Body: file.buffer,
+      ContentType: file.mimetype,
+      ACL: 'public-read',
+    };
+
+    const s3Response = await s3.upload(params).promise();
+    const fileUrl = s3Response.Location;
+    console.log('Голосовое сообщение загружено в S3:', fileUrl);
+
+    const [result] = await pool.query(
+      'INSERT INTO voice_messages (user_id, file_path, timestamp) VALUES (?, ?, NOW())',
+      [userId, fileUrl]
+    );
+
+    res.json({
+      success: true,
+      message: 'Голосовое сообщение успешно добавлено',
+      fileUrl: fileUrl,
+      id: result.insertId,
+    });
+  } catch (error) {
+    console.error('Ошибка при загрузке голосового сообщения:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при загрузке голосового сообщения', error: error.message });
   }
 });
 
