@@ -76,6 +76,7 @@ const upload = multer({
   { name: 'video', maxCount: 1 },
   { name: 'voice', maxCount: 1 },
   { name: 'screenshot', maxCount: 1 },
+  { name: 'avatar', maxCount: 1 }, // Добавлен для загрузки аватара группы
 ]);
 
 // Инициализация базы данных
@@ -84,11 +85,13 @@ const initializeDatabase = async () => {
     const connection = await pool.getConnection();
     console.log('Подключение к базе данных успешно');
 
+    // Обновление таблицы users
     await connection.query(`
       ALTER TABLE users
       ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(255) DEFAULT NULL
     `);
 
+    // Создание таблицы stories
     await connection.query(`
       CREATE TABLE IF NOT EXISTS stories (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -98,6 +101,8 @@ const initializeDatabase = async () => {
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
+
+    // Создание таблицы story_views
     await connection.query(`
       CREATE TABLE IF NOT EXISTS story_views (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -110,31 +115,34 @@ const initializeDatabase = async () => {
       )
     `);
 
+    // Создание таблицы groups
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS groups (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        creator_id INT NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        description TEXT,
+        avatar_url VARCHAR(255) DEFAULT NULL,
+        is_public BOOLEAN DEFAULT TRUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (creator_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
 
-    // Таблица для групп
-await connection.query(`
-  CREATE TABLE IF NOT EXISTS groups (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    creator_id INT NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    description TEXT,
-    avatar_url VARCHAR(255) DEFAULT NULL,
-    is_public BOOLEAN DEFAULT TRUE,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (creator_id) REFERENCES users(id) ON DELETE CASCADE
-  )
-`);
-await connection.query(`
-  CREATE TABLE IF NOT EXISTS group_members (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    group_id INT NOT NULL,
-    user_id INT NOT NULL,
-    joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    UNIQUE(group_id, user_id)
-  )
-`);
+    // Создание таблицы group_members
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS group_members (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        group_id INT NOT NULL,
+        user_id INT NOT NULL,
+        joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        UNIQUE(group_id, user_id)
+      )
+    `);
+
+    // Создание таблицы voice_messages
     await connection.query(`
       CREATE TABLE IF NOT EXISTS voice_messages (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -144,6 +152,8 @@ await connection.query(`
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
+
+    // Создание таблицы calls
     await connection.query(`
       CREATE TABLE IF NOT EXISTS calls (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -156,11 +166,12 @@ await connection.query(`
         FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
-    console.log('Таблицы users, stories, story_views, voice_messages и calls готовы');
+
+    console.log('Таблицы users, stories, story_views, groups, group_members, voice_messages и calls готовы');
 
     connection.release();
   } catch (err) {
-    console.error('Ошибка инициализации базы данных:', err.stack);
+    console.error('Ошибка инициализации базы данных:', err.message, err.stack);
   }
 };
 
@@ -197,8 +208,6 @@ router.post('/call/initiate', authenticateToken, async (req, res) => {
   }
 });
 
-
-
 // Маршрут для создания группы
 router.post('/groups', authenticateToken, upload, async (req, res) => {
   try {
@@ -226,8 +235,8 @@ router.post('/groups', authenticateToken, upload, async (req, res) => {
     }
 
     const [result] = await pool.query(
-     'INSERT INTO `groups` (creator_id, name, description, avatar_url, is_public) VALUES (?, ?, ?, ?, ?)',
-      [userId, name, description, avatarUrl, is_public === 'true']
+      'INSERT INTO groups (creator_id, name, description, avatar_url, is_public) VALUES (?, ?, ?, ?, ?)',
+      [userId, name, description || null, avatarUrl, is_public === 'true']
     );
 
     if (members) {
@@ -386,7 +395,7 @@ router.post('/call/screenshot', authenticateToken, upload, async (req, res) => {
   }
 });
 
-// Остальные маршруты (без изменений)
+// Маршрут для загрузки аватара
 router.post('/upload/avatar', authenticateToken, (req, res, next) => {
   upload(req, res, (err) => {
     if (err instanceof multer.MulterError) {
@@ -441,6 +450,7 @@ router.post('/upload/avatar', authenticateToken, (req, res, next) => {
   }
 });
 
+// Маршрут для удаления аватара
 router.delete('/delete/avatar', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
@@ -481,6 +491,7 @@ router.delete('/delete/avatar', authenticateToken, async (req, res) => {
   }
 });
 
+// Маршрут для загрузки истории
 router.post('/stories', authenticateToken, (req, res, next) => {
   upload(req, res, (err) => {
     if (err instanceof multer.MulterError) {
@@ -536,6 +547,7 @@ router.post('/stories', authenticateToken, (req, res, next) => {
   }
 });
 
+// Маршрут для загрузки голосового сообщения
 router.post('/voice-messages', authenticateToken, (req, res, next) => {
   upload(req, res, (err) => {
     if (err instanceof multer.MulterError) {
@@ -591,6 +603,7 @@ router.post('/voice-messages', authenticateToken, (req, res, next) => {
   }
 });
 
+// Маршрут для получения историй
 router.get('/stories', authenticateToken, async (req, res) => {
   try {
     const [stories] = await pool.query(`
@@ -603,7 +616,7 @@ router.get('/stories', authenticateToken, async (req, res) => {
 
     res.json({
       success: true,
-      data: stories
+      data: stories,
     });
   } catch (error) {
     console.error('Ошибка получения историй:', error.stack);
@@ -611,6 +624,7 @@ router.get('/stories', authenticateToken, async (req, res) => {
   }
 });
 
+// Маршрут для регистрации просмотра истории
 router.post('/stories/:id/view', authenticateToken, async (req, res) => {
   try {
     const storyId = req.params.id;
@@ -623,7 +637,7 @@ router.post('/stories/:id/view', authenticateToken, async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Просмотр зарегистрирован'
+      message: 'Просмотр зарегистрирован',
     });
   } catch (error) {
     console.error('Ошибка регистрации просмотра:', error.stack);
@@ -631,6 +645,7 @@ router.post('/stories/:id/view', authenticateToken, async (req, res) => {
   }
 });
 
+// Маршрут для получения просмотров истории
 router.get('/stories/:id/views', authenticateToken, async (req, res) => {
   try {
     const storyId = req.params.id;
@@ -660,8 +675,8 @@ router.get('/stories/:id/views', authenticateToken, async (req, res) => {
       success: true,
       data: {
         viewCount: views.length,
-        viewers: views.map(view => ({ name: view.name }))
-      }
+        viewers: views.map(view => ({ name: view.name })),
+      },
     });
   } catch (error) {
     console.error('Ошибка получения просмотров:', error.stack);
@@ -669,6 +684,7 @@ router.get('/stories/:id/views', authenticateToken, async (req, res) => {
   }
 });
 
+// Маршрут для получения профиля пользователя
 router.get('/user/profile', authenticateToken, async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT name, phone, avatar_url FROM users WHERE id = ?', [req.user.id]);
@@ -692,6 +708,7 @@ router.get('/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
+// Маршрут для обновления профиля
 router.put('/users/profile', authenticateToken, async (req, res) => {
   try {
     const { name, phone, password } = req.body;
@@ -737,8 +754,11 @@ router.put('/users/profile', authenticateToken, async (req, res) => {
   }
 });
 
+// Маршруты для регистрации и логина
 router.post('/register', userController.register);
 router.post('/login', userController.login);
+
+// Маршрут для получения списка пользователей
 router.get('/users', authenticateToken, async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT id, name, phone, avatar_url FROM users WHERE id != ?', [req.user.id]);
