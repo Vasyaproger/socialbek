@@ -109,6 +109,32 @@ const initializeDatabase = async () => {
         UNIQUE(story_id, user_id)
       )
     `);
+
+
+    // Таблица для групп
+await connection.query(`
+  CREATE TABLE IF NOT EXISTS groups (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    creator_id INT NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    avatar_url VARCHAR(255) DEFAULT NULL,
+    is_public BOOLEAN DEFAULT TRUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (creator_id) REFERENCES users(id) ON DELETE CASCADE
+  )
+`);
+await connection.query(`
+  CREATE TABLE IF NOT EXISTS group_members (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    group_id INT NOT NULL,
+    user_id INT NOT NULL,
+    joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE(group_id, user_id)
+  )
+`);
     await connection.query(`
       CREATE TABLE IF NOT EXISTS voice_messages (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -168,6 +194,118 @@ router.post('/call/initiate', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Ошибка инициации звонка:', error.stack);
     res.status(500).json({ success: false, message: 'Ошибка сервера при инициации звонка' });
+  }
+});
+
+
+
+// Маршрут для создания группы
+router.post('/groups', authenticateToken, upload, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { name, description, is_public, members } = req.body;
+    const file = req.files['avatar']?.[0];
+
+    if (!name) {
+      return res.status(400).json({ success: false, message: 'Название обязательно' });
+    }
+
+    let avatarUrl = null;
+    if (file) {
+      const fileName = `${userId}/group_${Date.now()}${path.extname(file.originalname)}`;
+      const bucketName = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+      const params = {
+        Bucket: bucketName,
+        Key: fileName,
+        Body: file.buffer,
+        ContentType: file.mimetype,
+        ACL: 'public-read',
+      };
+      const s3Response = await s3.upload(params).promise();
+      avatarUrl = s3Response.Location;
+    }
+
+    const [result] = await pool.query(
+      'INSERT INTO groups (creator_id, name, description, avatar_url, is_public) VALUES (?, ?, ?, ?, ?)',
+      [userId, name, description, avatarUrl, is_public === 'true']
+    );
+
+    if (members) {
+      const memberIds = JSON.parse(members);
+      const memberInserts = memberIds.map(mid => [result.insertId, mid]);
+      await pool.query(
+        'INSERT INTO group_members (group_id, user_id) VALUES ? ON DUPLICATE KEY UPDATE joined_at = NOW()',
+        [memberInserts]
+      );
+    }
+
+    res.json({
+      success: true,
+      message: 'Группа успешно создана',
+      id: result.insertId,
+      avatar_url: avatarUrl,
+    });
+  } catch (error) {
+    console.error('Ошибка создания группы:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при создании группы', error: error.message });
+  }
+});
+
+// Маршрут для получения списка групп
+router.get('/groups', authenticateToken, async (req, res) => {
+  try {
+    const [groups] = await pool.query(`
+      SELECT g.id, g.creator_id, g.name, g.description, g.avatar_url, g.is_public, g.created_at,
+             (SELECT COUNT(*) FROM group_members gm WHERE gm.group_id = g.id) as member_count
+      FROM groups g
+      ORDER BY g.created_at DESC
+    `);
+
+    res.json({
+      success: true,
+      data: groups.map(group => ({
+        id: group.id,
+        creator_id: group.creator_id,
+        name: group.name,
+        description: group.description,
+        avatar_url: group.avatar_url,
+        is_public: group.is_public,
+        member_count: group.member_count,
+      })),
+    });
+  } catch (error) {
+    console.error('Ошибка получения групп:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при получении групп', error: error.message });
+  }
+});
+
+// Маршрут для подписки на группу
+router.post('/groups/:id/join', authenticateToken, async (req, res) => {
+  try {
+    const groupId = req.params.id;
+    const userId = req.user.id;
+
+    const [group] = await pool.query('SELECT is_public FROM groups WHERE id = ?', [groupId]);
+    if (group.length === 0) {
+      return res.status(404).json({ success: false, message: 'Группа не найдена' });
+    }
+
+    if (!group[0].is_public) {
+      return res.status(403).json({ success: false, message: 'Это закрытая группа, требуется приглашение' });
+    }
+
+    await pool.query(
+      'INSERT INTO group_members (group_id, user_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE joined_at = NOW()',
+      [groupId, userId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Вы успешно присоединились к группе',
+    });
+  } catch (error) {
+    console.error('Ошибка присоединения к группе:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при присоединении к группе', error: error.message });
   }
 });
 
