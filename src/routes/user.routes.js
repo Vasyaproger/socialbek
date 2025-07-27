@@ -235,7 +235,6 @@ router.post('/groups', authenticateToken, upload, async (req, res) => {
       avatarUrl = s3Response.Location;
     }
 
-    // Убедимся, что description является строкой или null
     const safeDescription = description ? String(description) : null;
 
     const [result] = await pool.query(
@@ -244,12 +243,40 @@ router.post('/groups', authenticateToken, upload, async (req, res) => {
     );
 
     if (members) {
-      const memberIds = JSON.parse(members);
-      const memberInserts = memberIds.map(mid => [result.insertId, mid]);
-      await pool.query(
-        'INSERT INTO `group_members` (group_id, user_id) VALUES ? ON DUPLICATE KEY UPDATE joined_at = NOW()',
-        [memberInserts]
+      let memberIds;
+      try {
+        memberIds = JSON.parse(members);
+        if (!Array.isArray(memberIds)) {
+          throw new Error('Members must be an array of user IDs');
+        }
+      } catch (parseError) {
+        console.error('Ошибка парсинга members:', parseError.message);
+        return res.status(400).json({ success: false, message: 'Некорректный формат members' });
+      }
+
+      // Validate member IDs
+      const [existingUsers] = await pool.query(
+        'SELECT id FROM users WHERE id IN (?)',
+        [memberIds]
       );
+      const validMemberIds = existingUsers.map(user => user.id);
+
+      // Filter out invalid member IDs
+      const invalidMemberIds = memberIds.filter(mid => !validMemberIds.includes(mid));
+      if (invalidMemberIds.length > 0) {
+        console.warn('Некоторые user_id не существуют:', invalidMemberIds);
+        // Optionally, you can return an error or proceed with valid IDs
+        // return res.status(400).json({ success: false, message: `Пользователи с ID ${invalidMemberIds.join(', ')} не найдены` });
+      }
+
+      // Insert only valid member IDs
+      const memberInserts = validMemberIds.map(mid => [result.insertId, mid]);
+      if (memberInserts.length > 0) {
+        await pool.query(
+          'INSERT INTO `group_members` (group_id, user_id) VALUES ? ON DUPLICATE KEY UPDATE joined_at = NOW()',
+          [memberInserts]
+        );
+      }
     }
 
     res.json({
@@ -261,63 +288,6 @@ router.post('/groups', authenticateToken, upload, async (req, res) => {
   } catch (error) {
     console.error('Ошибка создания группы:', error.message, error.stack);
     res.status(500).json({ success: false, message: 'Ошибка сервера при создании группы', error: error.message });
-  }
-});
-// Маршрут для получения списка групп
-router.get('/groups', authenticateToken, async (req, res) => {
-  try {
-    const [groups] = await pool.query(`
-      SELECT g.id, g.creator_id, g.name, g.description, g.avatar_url, g.is_public, g.created_at,
-             (SELECT COUNT(*) FROM group_members gm WHERE gm.group_id = g.id) as member_count
-      FROM groups g
-      ORDER BY g.created_at DESC
-    `);
-
-    res.json({
-      success: true,
-      data: groups.map(group => ({
-        id: group.id,
-        creator_id: group.creator_id,
-        name: group.name,
-        description: group.description,
-        avatar_url: group.avatar_url,
-        is_public: group.is_public,
-        member_count: group.member_count,
-      })),
-    });
-  } catch (error) {
-    console.error('Ошибка получения групп:', error.stack);
-    res.status(500).json({ success: false, message: 'Ошибка сервера при получении групп', error: error.message });
-  }
-});
-
-// Маршрут для подписки на группу
-router.post('/groups/:id/join', authenticateToken, async (req, res) => {
-  try {
-    const groupId = req.params.id;
-    const userId = req.user.id;
-
-    const [group] = await pool.query('SELECT is_public FROM groups WHERE id = ?', [groupId]);
-    if (group.length === 0) {
-      return res.status(404).json({ success: false, message: 'Группа не найдена' });
-    }
-
-    if (!group[0].is_public) {
-      return res.status(403).json({ success: false, message: 'Это закрытая группа, требуется приглашение' });
-    }
-
-    await pool.query(
-      'INSERT INTO group_members (group_id, user_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE joined_at = NOW()',
-      [groupId, userId]
-    );
-
-    res.json({
-      success: true,
-      message: 'Вы успешно присоединились к группе',
-    });
-  } catch (error) {
-    console.error('Ошибка присоединения к группе:', error.stack);
-    res.status(500).json({ success: false, message: 'Ошибка сервера при присоединении к группе', error: error.message });
   }
 });
 
