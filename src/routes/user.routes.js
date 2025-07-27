@@ -153,6 +153,21 @@ const initializeDatabase = async () => {
       )
     `);
 
+  await connection.query(`
+  CREATE TABLE IF NOT EXISTS group_messages (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    group_id INT NOT NULL,
+    user_id INT NOT NULL,
+    content TEXT,
+    file_url VARCHAR(255) DEFAULT NULL,
+    file_type ENUM('image', 'video', 'audio') DEFAULT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  )
+`);
+console.log('Таблица group_messages создана');
+
     // Создание таблицы calls
     await connection.query(`
       CREATE TABLE IF NOT EXISTS calls (
@@ -208,6 +223,368 @@ router.post('/call/initiate', authenticateToken, async (req, res) => {
   }
 });
 
+
+
+// Получение информации о группе
+router.get('/groups/:id', authenticateToken, async (req, res) => {
+  try {
+    const groupId = req.params.id;
+    const userId = req.user.id;
+
+    // Проверяем, существует ли группа и является ли пользователь её участником
+    const [group] = await pool.query(
+      `SELECT g.id, g.name, g.description, g.avatar_url, g.is_public, g.creator_id,
+              COUNT(gm.user_id) as member_count
+       FROM groups g
+       LEFT JOIN group_members gm ON g.id = gm.group_id
+       WHERE g.id = ?
+       GROUP BY g.id`,
+      [groupId]
+    );
+
+    if (group.length === 0) {
+      return res.status(404).json({ success: false, message: 'Группа не найдена' });
+    }
+
+    const [isMember] = await pool.query(
+      'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
+      [groupId, userId]
+    );
+
+    // Проверяем доступ для закрытых групп
+    if (!group[0].is_public && isMember.length === 0 && group[0].creator_id !== userId) {
+      return res.status(403).json({ success: false, message: 'Доступ к закрытой группе запрещён' });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        id: group[0].id,
+        name: group[0].name,
+        description: group[0].description,
+        avatar_url: group[0].avatar_url,
+        is_public: group[0].is_public,
+        creator_id: group[0].creator_id,
+        member_count: parseInt(group[0].member_count),
+        is_member: isMember.length > 0 || group[0].creator_id === userId,
+      },
+    });
+  } catch (error) {
+    console.error('Ошибка получения информации о группе:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при получении информации о группе' });
+  }
+});
+
+
+
+// Редактирование группы
+router.put('/groups/:id', authenticateToken, upload, async (req, res) => {
+  try {
+    const groupId = req.params.id;
+    const userId = req.user.id;
+    const { name, description, is_public } = req.body;
+    const file = req.files['avatar']?.[0];
+
+    // Проверяем, является ли пользователь создателем группы
+    const [group] = await pool.query(
+      'SELECT creator_id FROM groups WHERE id = ?',
+      [groupId]
+    );
+
+    if (group.length === 0) {
+      return res.status(404).json({ success: false, message: 'Группа не найдена' });
+    }
+
+    if (group[0].creator_id !== userId) {
+      return res.status(403).json({ success: false, message: 'Только создатель может редактировать группу' });
+    }
+
+    let avatarUrl = null;
+    if (file) {
+      const fileName = `${userId}/group_${Date.now()}${path.extname(file.originalname)}`;
+      const bucketName = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+      const params = {
+        Bucket: bucketName,
+        Key: fileName,
+        Body: file.buffer,
+        ContentType: file.mimetype,
+        ACL: 'public-read',
+      };
+      const s3Response = await s3.upload(params).promise();
+      avatarUrl = s3Response.Location;
+
+      // Удаляем старый аватар, если он есть
+      if (group[0].avatar_url) {
+        const oldFileName = group[0].avatar_url.split('/').slice(-2).join('/');
+        await s3.deleteObject({ Bucket: bucketName, Key: oldFileName }).promise();
+      }
+    }
+
+    const updates = [];
+    const values = [];
+
+    if (name) {
+      updates.push('name = ?');
+      values.push(name);
+    }
+    if (description !== undefined) {
+      updates.push('description = ?');
+      values.push(description);
+    }
+    if (is_public !== undefined) {
+      updates.push('is_public = ?');
+      values.push(is_public === 'true');
+    }
+    if (avatarUrl) {
+      updates.push('avatar_url = ?');
+      values.push(avatarUrl);
+    }
+
+    if (updates.length > 0) {
+      values.push(groupId);
+      await pool.query(
+        `UPDATE groups SET ${updates.join(', ')} WHERE id = ?`,
+        values
+      );
+    }
+
+    res.json({
+      success: true,
+      message: 'Группа успешно обновлена',
+      avatar_url: avatarUrl,
+    });
+  } catch (error) {
+    console.error('Ошибка редактирования группы:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при редактировании группы' });
+  }
+});
+
+
+
+// Исключение участника из группы
+router.delete('/groups/:groupId/members/:userId', authenticateToken, async (req, res) => {
+  try {
+    const { groupId, userId } = req.params;
+    const creatorId = req.user.id;
+
+    // Проверяем, является ли пользователь создателем группы
+    const [group] = await pool.query(
+      'SELECT creator_id FROM groups WHERE id = ?',
+      [groupId]
+    );
+
+    if (group.length === 0) {
+      return res.status(404).json({ success: false, message: 'Группа не найдена' });
+    }
+
+    if (group[0].creator_id !== creatorId) {
+      return res.status(403).json({ success: false, message: 'Только создатель может исключать участников' });
+    }
+
+    if (parseInt(userId) === creatorId) {
+      return res.status(400).json({ success: false, message: 'Создатель не может исключить себя' });
+    }
+
+    // Проверяем, является ли пользователь участником группы
+    const [member] = await pool.query(
+      'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
+      [groupId, userId]
+    );
+
+    if (member.length === 0) {
+      return res.status(404).json({ success: false, message: 'Пользователь не является участником группы' });
+    }
+
+    await pool.query(
+      'DELETE FROM group_members WHERE group_id = ? AND user_id = ?',
+      [groupId, userId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Пользователь успешно исключён из группы',
+    });
+  } catch (error) {
+    console.error('Ошибка исключения участника:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при исключении участника' });
+  }
+});
+
+
+
+// Отправка сообщения в группе
+router.post('/groups/:groupId/messages', authenticateToken, upload, async (req, res) => {
+  try {
+    const groupId = req.params.groupId;
+    const userId = req.user.id;
+    const { content } = req.body;
+    const file = req.files['image']?.[0] || req.files['video']?.[0];
+
+    // Проверяем, существует ли группа и является ли пользователь её участником
+    const [group] = await pool.query(
+      'SELECT creator_id, is_public FROM groups WHERE id = ?',
+      [groupId]
+    );
+
+    if (group.length === 0) {
+      return res.status(404).json({ success: false, message: 'Группа не найдена' });
+    }
+
+    const [isMember] = await pool.query(
+      'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
+      [groupId, userId]
+    );
+
+    if (!group[0].is_public && group[0].creator_id !== userId && isMember.length === 0) {
+      return res.status(403).json({ success: false, message: 'Доступ к отправке сообщений запрещён' });
+    }
+
+    // В закрытой группе только создатель может отправлять сообщения
+    if (!group[0].is_public && group[0].creator_id !== userId) {
+      return res.status(403).json({ success: false, message: 'Только создатель может отправлять сообщения в закрытой группе' });
+    }
+
+    let fileUrl = null;
+    let fileType = null;
+    if (file) {
+      const fileName = `${userId}/group_message_${Date.now()}${path.extname(file.originalname)}`;
+      const bucketName = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+      const params = {
+        Bucket: bucketName,
+        Key: fileName,
+        Body: file.buffer,
+        ContentType: file.mimetype,
+        ACL: 'public-read',
+      };
+      const s3Response = await s3.upload(params).promise();
+      fileUrl = s3Response.Location;
+      fileType = file.mimetype.startsWith('image') ? 'image' : 'video';
+    }
+
+    const [result] = await pool.query(
+      'INSERT INTO group_messages (group_id, user_id, content, file_url, file_type) VALUES (?, ?, ?, ?, ?)',
+      [groupId, userId, content || null, fileUrl, fileType]
+    );
+
+    res.json({
+      success: true,
+      message: 'Сообщение успешно отправлено',
+      data: {
+        id: result.insertId,
+        group_id: groupId,
+        user_id: userId,
+        content,
+        file_url: fileUrl,
+        file_type: fileType,
+        created_at: new Date(),
+      },
+    });
+  } catch (error) {
+    console.error('Ошибка отправки сообщения:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при отправке сообщения' });
+  }
+});
+
+
+
+// Получение сообщений группы
+router.get('/groups/:groupId/messages', authenticateToken, async (req, res) => {
+  try {
+    const groupId = req.params.groupId;
+    const userId = req.user.id;
+
+    // Проверяем, существует ли группа и является ли пользователь её участником
+    const [group] = await pool.query(
+      'SELECT is_public, creator_id FROM groups WHERE id = ?',
+      [groupId]
+    );
+
+    if (group.length === 0) {
+      return res.status(404).json({ success: false, message: 'Группа не найдена' });
+    }
+
+    const [isMember] = await pool.query(
+      'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
+      [groupId, userId]
+    );
+
+    if (!group[0].is_public && isMember.length === 0 && group[0].creator_id !== userId) {
+      return res.status(403).json({ success: false, message: 'Доступ к сообщениям группы запрещён' });
+    }
+
+    const [messages] = await pool.query(
+      `SELECT gm.id, gm.user_id, u.name AS user_name, gm.content, gm.file_url, gm.file_type, gm.created_at
+       FROM group_messages gm
+       JOIN users u ON gm.user_id = u.id
+       WHERE gm.group_id = ?
+       ORDER BY gm.created_at DESC
+       LIMIT 50`,
+      [groupId]
+    );
+
+    res.json({
+      success: true,
+      data: messages.map(msg => ({
+        id: msg.id,
+        user_id: msg.user_id,
+        user_name: msg.user_name,
+        content: msg.content,
+        file_url: msg.file_url,
+        file_type: msg.file_type,
+        created_at: msg.created_at,
+      })),
+    });
+  } catch (error) {
+    console.error('Ошибка получения сообщений группы:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при получении сообщений группы' });
+  }
+});
+
+// Покинуть группу
+router.delete('/groups/:groupId/leave', authenticateToken, async (req, res) => {
+  try {
+    const groupId = req.params.groupId;
+    const userId = req.user.id;
+
+    // Проверяем, существует ли группа
+    const [group] = await pool.query(
+      'SELECT creator_id FROM groups WHERE id = ?',
+      [groupId]
+    );
+
+    if (group.length === 0) {
+      return res.status(404).json({ success: false, message: 'Группа не найдена' });
+    }
+
+    // Создатель не может покинуть группу
+    if (group[0].creator_id === userId) {
+      return res.status(403).json({ success: false, message: 'Создатель не может покинуть группу' });
+    }
+
+    // Проверяем, является ли пользователь участником группы
+    const [member] = await pool.query(
+      'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
+      [groupId, userId]
+    );
+
+    if (member.length === 0) {
+      return res.status(400).json({ success: false, message: 'Вы не являетесь участником группы' });
+    }
+
+    await pool.query(
+      'DELETE FROM group_members WHERE group_id = ? AND user_id = ?',
+      [groupId, userId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Вы успешно покинули группу',
+    });
+  } catch (error) {
+    console.error('Ошибка выхода из группы:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при выходе из группы' });
+  }
+});
 // Маршрут для создания группы
 // Маршрут для создания группы
 router.post('/groups', authenticateToken, upload, async (req, res) => {
