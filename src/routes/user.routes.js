@@ -1,4 +1,3 @@
-
 const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/user.controller');
@@ -86,7 +85,6 @@ const initializeDatabase = async () => {
     const connection = await pool.getConnection();
     console.log('Подключение к базе данных успешно');
 
-    // Проверяем существование столбцов и добавляем их по одному, если отсутствуют
     const [columns] = await connection.query('SHOW COLUMNS FROM users');
     const columnNames = columns.map(col => col.Field);
 
@@ -107,7 +105,6 @@ const initializeDatabase = async () => {
       }
     }
 
-    // Создание таблицы stories
     await connection.query(`
       CREATE TABLE IF NOT EXISTS stories (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -119,7 +116,6 @@ const initializeDatabase = async () => {
     `);
     console.log('Таблица stories создана или уже существует');
 
-    // Создание таблицы story_views
     await connection.query(`
       CREATE TABLE IF NOT EXISTS story_views (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -133,7 +129,6 @@ const initializeDatabase = async () => {
     `);
     console.log('Таблица story_views создана или уже существует');
 
-    // Создание таблицы groups
     await connection.query(`
       CREATE TABLE IF NOT EXISTS groups (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -148,7 +143,6 @@ const initializeDatabase = async () => {
     `);
     console.log('Таблица groups создана или уже существует');
 
-    // Создание таблицы group_members
     await connection.query(`
       CREATE TABLE IF NOT EXISTS group_members (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -162,7 +156,6 @@ const initializeDatabase = async () => {
     `);
     console.log('Таблица group_members создана или уже существует');
 
-    // Создание таблицы voice_messages
     await connection.query(`
       CREATE TABLE IF NOT EXISTS voice_messages (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -174,7 +167,6 @@ const initializeDatabase = async () => {
     `);
     console.log('Таблица voice_messages создана или уже существует');
 
-    // Создание таблицы group_messages
     await connection.query(`
       CREATE TABLE IF NOT EXISTS group_messages (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -190,7 +182,6 @@ const initializeDatabase = async () => {
     `);
     console.log('Таблица group_messages создана или уже существует');
 
-    // Создание таблицы calls
     await connection.query(`
       CREATE TABLE IF NOT EXISTS calls (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -428,6 +419,8 @@ router.post('/groups/:groupId/messages', authenticateToken, upload, async (req, 
     const { content } = req.body;
     const file = req.files['image']?.[0] || req.files['video']?.[0];
 
+    console.log('Попытка отправки сообщения:', { groupId, userId, content, file: file ? file.originalname : null });
+
     const [group] = await pool.query(
       'SELECT creator_id, is_public FROM groups WHERE id = ?',
       [groupId]
@@ -442,12 +435,10 @@ router.post('/groups/:groupId/messages', authenticateToken, upload, async (req, 
       [groupId, userId]
     );
 
-    if (!group[0].is_public && group[0].creator_id !== userId && isMember.length === 0) {
-      return res.status(403).json({ success: false, message: 'Доступ к отправке сообщений запрещён' });
-    }
+    console.log('Проверка членства:', { isMember: isMember.length > 0, isCreator: group[0].creator_id === userId, isPublic: group[0].is_public });
 
-    if (!group[0].is_public && group[0].creator_id !== userId) {
-      return res.status(403).json({ success: false, message: 'Только создатель может отправлять сообщения в закрытой группе' });
+    if (!group[0].is_public && isMember.length === 0 && group[0].creator_id !== userId) {
+      return res.status(403).json({ success: false, message: 'Доступ к отправке сообщений запрещён. Вы не являетесь членом группы.' });
     }
 
     let fileUrl = null;
@@ -553,7 +544,6 @@ router.get('/users/search', authenticateToken, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Введите поисковый запрос' });
     }
 
-    // Проверяем наличие столбцов
     const [columns] = await pool.query('SHOW COLUMNS FROM users');
     const columnNames = columns.map(col => col.Field);
     const selectFields = ['id', 'name', 'phone', 'avatar_url'];
