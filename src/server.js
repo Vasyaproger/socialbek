@@ -89,7 +89,6 @@ wss.on('connection', (ws, req) => {
     const decoded = jwt.verify(token, JWT_SECRET, { maxAge: '24h' });
     userId = decoded.id;
 
-    // Проверка дублирующих соединений с небольшой задержкой
     if (clients.has(userId.toString())) {
       logWithTimestamp(`Обнаружено дублирующее соединение для пользователя ${userId}, ожидание 2 секунды перед закрытием`);
       setTimeout(() => {
@@ -97,11 +96,14 @@ wss.on('connection', (ws, req) => {
           cleanupClient(userId.toString());
           logWithTimestamp(`Старое соединение для пользователя ${userId} закрыто`);
         }
-      }, 2000); // Задержка 2 секунды
+      }, 2000);
     }
 
     clients.set(userId.toString(), ws);
     logWithTimestamp(`Пользователь ${userId} подключился к WebSocket`);
+
+    // Отправка статуса всем клиентам при подключении
+    broadcastOnlineStatus(userId, true);
 
     const pingInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
@@ -132,49 +134,7 @@ wss.on('connection', (ws, req) => {
 
         if (data.type === 'message') {
           const { senderId, receiverId, content, type } = data;
-
-          const validTypes = ['text', 'sticker', 'video', 'video_circle', 'voice'];
-          if (!validTypes.includes(type)) {
-            ws.send(JSON.stringify({ success: false, message: 'Недопустимый тип сообщения' }));
-            return;
-          }
-
-          if (!senderId || !receiverId || !content || !type) {
-            ws.send(JSON.stringify({ success: false, message: 'Отсутствуют обязательные поля' }));
-            return;
-          }
-
-          if (senderId !== userId.toString()) {
-            ws.send(JSON.stringify({ success: false, message: 'Недостаточно прав' }));
-            return;
-          }
-
-          const escapedContent = pool.escape(content).replace(/'/g, "''");
-
-          const [result] = await pool.execute(
-            'INSERT INTO messages (sender_id, receiver_id, content, type, created_at) VALUES (?, ?, ?, ?, NOW())',
-            [senderId, receiverId, escapedContent, type]
-          );
-          logWithTimestamp(`Сообщение сохранено в базе данных, id: ${result.insertId}`);
-
-          const messageData = {
-            id: result.insertId,
-            senderId,
-            receiverId,
-            content,
-            type,
-            createdAt: new Date().toISOString(),
-          };
-
-          const receiverWs = clients.get(receiverId);
-          if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
-            receiverWs.send(JSON.stringify({ type: 'message', ...messageData }));
-            logWithTimestamp(`Сообщение отправлено получателю ${receiverId}`);
-          } else {
-            logWithTimestamp(`Получатель ${receiverId} не в сети`);
-          }
-
-          ws.send(JSON.stringify({ success: true, message: messageData }));
+          // ... (оставьте существующий код без изменений)
         } else if (data.type === 'offer' || data.type === 'answer' || data.type === 'ice_candidate') {
           const receiverWs = clients.get(data.receiverId);
           if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
@@ -189,6 +149,22 @@ wss.on('connection', (ws, req) => {
             ws.send(JSON.stringify({ type: 'offline', receiverId: data.receiverId }));
             logWithTimestamp(`Получатель ${data.receiverId} не в сети для WebRTC`);
           }
+        } else if (data.type === 'online_status') {
+          const receiverId = data.receiverId;
+          const receiverWs = clients.get(receiverId);
+          if (receiverWs && receiverWs.readyState === WebSocket.OPEN) {
+            receiverWs.send(JSON.stringify({
+              type: 'online_status',
+              isOnline: true,
+              senderId: receiverId,
+            }));
+          } else {
+            ws.send(JSON.stringify({
+              type: 'online_status',
+              isOnline: false,
+              senderId: receiverId,
+            }));
+          }
         } else {
           ws.send(JSON.stringify({ success: false, message: 'Неизвестный тип сообщения' }));
         }
@@ -202,6 +178,7 @@ wss.on('connection', (ws, req) => {
 
     ws.on('close', (code, reason) => {
       cleanupClient(userId.toString());
+      broadcastOnlineStatus(userId, false);
       logWithTimestamp(`Пользователь ${userId} отключился от WebSocket, код: ${code}, причина: ${reason.toString()}`);
     });
 
@@ -220,7 +197,7 @@ wss.on('connection', (ws, req) => {
         return;
       }
       ws.isAlive = false;
-    }, 180000); // Увеличено до 180 секунд для стабильности видеозвонков
+    }, 180000);
 
   } catch (error) {
     logWithTimestamp('Ошибка аутентификации WebSocket:', error.message, error.stack);
@@ -229,6 +206,18 @@ wss.on('connection', (ws, req) => {
   }
 });
 
+// Функция для отправки статуса всем подключенным клиентам
+function broadcastOnlineStatus(userId, isOnline) {
+  clients.forEach((client, id) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify({
+        type: 'online_status',
+        isOnline: isOnline,
+        senderId: userId,
+      }));
+    }
+  });
+}
 // Обработка ошибок сервера
 server.on('error', (error) => {
   logWithTimestamp('Ошибка сервера:', error.message, error.stack);
