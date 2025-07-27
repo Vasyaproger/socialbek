@@ -37,7 +37,7 @@ const s3 = new AWS.S3({
   s3ForcePathStyle: true,
 });
 
-// Конфигурация Multer для поддержки всех форматов, включая голосовые сообщения
+// Конфигурация Multer для поддержки всех форматов, включая аватар
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 }, // Увеличено до 50 МБ
@@ -74,7 +74,7 @@ const upload = multer({
   { name: 'file', maxCount: 1 },
   { name: 'image', maxCount: 1 },
   { name: 'video', maxCount: 1 },
-  { name: 'voice', maxCount: 1 }, // Добавлено для голосовых сообщений
+  { name: 'voice', maxCount: 1 },
 ]);
 
 // Инициализация базы данных
@@ -82,6 +82,12 @@ const initializeDatabase = async () => {
   try {
     const connection = await pool.getConnection();
     console.log('Подключение к базе данных успешно');
+
+    // Обновление таблицы users для поддержки avatar_url
+    await connection.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(255) DEFAULT NULL
+    `);
 
     await connection.query(`
       CREATE TABLE IF NOT EXISTS stories (
@@ -111,8 +117,8 @@ const initializeDatabase = async () => {
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
-    `); // Добавлена таблица для голосовых сообщений
-    console.log('Таблицы stories, story_views и voice_messages готовы');
+    `);
+    console.log('Таблицы users, stories, story_views и voice_messages готовы');
 
     connection.release();
   } catch (err) {
@@ -121,6 +127,102 @@ const initializeDatabase = async () => {
 };
 
 initializeDatabase();
+
+// Маршрут для загрузки аватара
+router.post('/upload/avatar', authenticateToken, (req, res, next) => {
+  upload(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      console.error('Ошибка Multer:', err.message, err.stack);
+      return res.status(400).json({ success: false, message: `Ошибка Multer: ${err.message}` });
+    } else if (err) {
+      console.error('Ошибка фильтрации файла:', err.message);
+      return res.status(400).json({ success: false, message: err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const file = req.files['image']?.[0];
+
+    if (!file) {
+      console.error('Файл аватара не предоставлен в запросе:', req.body, req.headers);
+      return res.status(400).json({ success: false, message: 'Файл аватара не предоставлен' });
+    }
+
+    console.log('Загружаемый аватар:', file.originalname, file.mimetype, file.size);
+
+    const fileName = `${userId}/avatar_${Date.now()}${path.extname(file.originalname)}`;
+    const bucketName = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+
+    const params = {
+      Bucket: bucketName,
+      Key: fileName,
+      Body: file.buffer,
+      ContentType: file.mimetype,
+      ACL: 'public-read',
+    };
+
+    const s3Response = await s3.upload(params).promise();
+    const avatarUrl = s3Response.Location;
+    console.log('Аватар загружен в S3:', avatarUrl);
+
+    await pool.query(
+      'UPDATE users SET avatar_url = ? WHERE id = ?',
+      [avatarUrl, userId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Аватар успешно загружен',
+      avatar_url: avatarUrl,
+    });
+  } catch (error) {
+    console.error('Ошибка при загрузке аватара:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при загрузке аватара', error: error.message });
+  }
+});
+
+// Маршрут для удаления аватара
+router.delete('/delete/avatar', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const [user] = await pool.query(
+      'SELECT avatar_url FROM users WHERE id = ?',
+      [userId]
+    );
+
+    if (user.length === 0) {
+      return res.status(404).json({ success: false, message: 'Пользователь не найден' });
+    }
+
+    if (user[0].avatar_url) {
+      const fileName = user[0].avatar_url.split('/').slice(-2).join('/');
+      const bucketName = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+
+      await s3.deleteObject({
+        Bucket: bucketName,
+        Key: fileName,
+      }).promise();
+
+      console.log('Аватар удален из S3:', fileName);
+    }
+
+    await pool.query(
+      'UPDATE users SET avatar_url = NULL WHERE id = ?',
+      [userId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Аватар успешно удален',
+    });
+  } catch (error) {
+    console.error('Ошибка при удалении аватара:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при удалении аватара', error: error.message });
+  }
+});
 
 // Маршрут для загрузки историй
 router.post('/stories', authenticateToken, (req, res, next) => {
@@ -315,33 +417,10 @@ router.get('/stories/:id/views', authenticateToken, async (req, res) => {
   }
 });
 
-// Остальные маршруты
-router.post('/register', userController.register);
-router.post('/login', userController.login);
-router.get('/users', authenticateToken, async (req, res) => {
-  try {
-    const [rows] = await pool.query('SELECT id, name, phone FROM users WHERE id != ?', [req.user.id]);
-    console.log('Получены пользователи:', rows.length);
-    res.json({
-      success: true,
-      data: rows.map((user) => ({
-        id: user.id,
-        name: user.name,
-        phone: user.phone,
-        lastMessage: 'Нет сообщений',
-        time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
-        unread: 0,
-      })),
-    });
-  } catch (error) {
-    console.error('Ошибка получения списка пользователей:', error.stack);
-    res.status(500).json({ success: false, message: 'Ошибка сервера при получении списка пользователей', error: error.message });
-  }
-});
-
+// Маршрут для получения профиля пользователя
 router.get('/user/profile', authenticateToken, async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT name, phone FROM users WHERE id = ?', [req.user.id]);
+    const [rows] = await pool.query('SELECT name, phone, avatar_url FROM users WHERE id = ?', [req.user.id]);
     if (rows.length === 0) {
       console.error('Пользователь не найден, id:', req.user.id);
       return res.status(404).json({ success: false, message: 'Пользователь не найден' });
@@ -353,11 +432,83 @@ router.get('/user/profile', authenticateToken, async (req, res) => {
       data: {
         name: user.name,
         phone: user.phone,
+        avatar_url: user.avatar_url,
       },
     });
   } catch (error) {
     console.error('Ошибка получения профиля:', error.stack);
     res.status(500).json({ success: false, message: 'Ошибка сервера при получении профиля', error: error.message });
+  }
+});
+
+// Маршрут для обновления профиля
+router.put('/users/profile', authenticateToken, async (req, res) => {
+  try {
+    const { name, phone, password } = req.body;
+    const userId = req.user.id;
+
+    if (!name || !phone) {
+      return res.status(400).json({ success: false, message: 'Имя и телефон обязательны' });
+    }
+
+    const updates = [];
+    const values = [];
+
+    if (name) {
+      updates.push('name = ?');
+      values.push(name);
+    }
+    if (phone) {
+      updates.push('phone = ?');
+      values.push(phone);
+    }
+    if (password) {
+      const bcrypt = require('bcrypt');
+      const saltRounds = 10;
+      const hashedPassword = await bcrypt.hash(password, saltRounds);
+      updates.push('password = ?');
+      values.push(hashedPassword);
+    }
+
+    values.push(userId);
+
+    await pool.query(
+      `UPDATE users SET ${updates.join(', ')} WHERE id = ?`,
+      values
+    );
+
+    res.json({
+      success: true,
+      message: 'Профиль успешно обновлен',
+    });
+  } catch (error) {
+    console.error('Ошибка обновления профиля:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при обновлении профиля', error: error.message });
+  }
+});
+
+// Остальные маршруты
+router.post('/register', userController.register);
+router.post('/login', userController.login);
+router.get('/users', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT id, name, phone, avatar_url FROM users WHERE id != ?', [req.user.id]);
+    console.log('Получены пользователи:', rows.length);
+    res.json({
+      success: true,
+      data: rows.map((user) => ({
+        id: user.id,
+        name: user.name,
+        phone: user.phone,
+        avatar_url: user.avatar_url,
+        lastMessage: 'Нет сообщений',
+        time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+        unread: 0,
+      })),
+    });
+  } catch (error) {
+    console.error('Ошибка получения списка пользователей:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при получении списка пользователей', error: error.message });
   }
 });
 
