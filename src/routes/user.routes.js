@@ -37,10 +37,10 @@ const s3 = new AWS.S3({
   s3ForcePathStyle: true,
 });
 
-// Конфигурация Multer для поддержки всех форматов, включая аватар
+// Конфигурация Multer
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 }, // Увеличено до 50 МБ
+  limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const fileTypes = /\.(jpeg|jpg|png|gif|webp|mp4|mov|avi|mkv|m4a|mp3|wav|opus|aac)$/i;
     const extname = fileTypes.test(path.extname(file.originalname).toLowerCase());
@@ -75,6 +75,7 @@ const upload = multer({
   { name: 'image', maxCount: 1 },
   { name: 'video', maxCount: 1 },
   { name: 'voice', maxCount: 1 },
+  { name: 'screenshot', maxCount: 1 },
 ]);
 
 // Инициализация базы данных
@@ -83,7 +84,6 @@ const initializeDatabase = async () => {
     const connection = await pool.getConnection();
     console.log('Подключение к базе данных успешно');
 
-    // Обновление таблицы users для поддержки avatar_url
     await connection.query(`
       ALTER TABLE users
       ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(255) DEFAULT NULL
@@ -118,7 +118,19 @@ const initializeDatabase = async () => {
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
-    console.log('Таблицы users, stories, story_views и voice_messages готовы');
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS calls (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        caller_id INT NOT NULL,
+        receiver_id INT NOT NULL,
+        status ENUM('initiated', 'accepted', 'rejected', 'ended') NOT NULL,
+        start_time DATETIME,
+        end_time DATETIME,
+        FOREIGN KEY (caller_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+    console.log('Таблицы users, stories, story_views, voice_messages и calls готовы');
 
     connection.release();
   } catch (err) {
@@ -128,7 +140,115 @@ const initializeDatabase = async () => {
 
 initializeDatabase();
 
-// Маршрут для загрузки аватара
+// Маршрут для инициации звонка
+router.post('/call/initiate', authenticateToken, async (req, res) => {
+  try {
+    const { receiverId } = req.body;
+    const callerId = req.user.id;
+
+    if (!receiverId) {
+      return res.status(400).json({ success: false, message: 'ID получателя обязателен' });
+    }
+
+    const [receiver] = await pool.query('SELECT id FROM users WHERE id = ?', [receiverId]);
+    if (receiver.length === 0) {
+      return res.status(404).json({ success: false, message: 'Получатель не найден' });
+    }
+
+    const [result] = await pool.query(
+      'INSERT INTO calls (caller_id, receiver_id, status, start_time) VALUES (?, ?, ?, NOW())',
+      [callerId, receiverId, 'initiated']
+    );
+
+    res.json({
+      success: true,
+      message: 'Звонок инициирован',
+      callId: result.insertId,
+    });
+  } catch (error) {
+    console.error('Ошибка инициации звонка:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при инициации звонка' });
+  }
+});
+
+// Маршрут для завершения звонка
+router.post('/call/end', authenticateToken, async (req, res) => {
+  try {
+    const { callId } = req.body;
+    const userId = req.user.id;
+
+    if (!callId) {
+      return res.status(400).json({ success: false, message: 'ID звонка обязателен' });
+    }
+
+    const [call] = await pool.query(
+      'SELECT caller_id, receiver_id FROM calls WHERE id = ? AND status != ?',
+      [callId, 'ended']
+    );
+
+    if (call.length === 0) {
+      return res.status(404).json({ success: false, message: 'Звонок не найден или уже завершен' });
+    }
+
+    if (call[0].caller_id !== userId && call[0].receiver_id !== userId) {
+      return res.status(403).json({ success: false, message: 'Доступ запрещён' });
+    }
+
+    await pool.query(
+      'UPDATE calls SET status = ?, end_time = NOW() WHERE id = ?',
+      ['ended', callId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Звонок завершен',
+    });
+  } catch (error) {
+    console.error('Ошибка завершения звонка:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при завершении звонка' });
+  }
+});
+
+// Маршрут для загрузки скриншота
+router.post('/call/screenshot', authenticateToken, upload, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const file = req.files['screenshot']?.[0];
+
+    if (!file) {
+      console.error('Скриншот не предоставлен в запросе:', req.body, req.headers);
+      return res.status(400).json({ success: false, message: 'Скриншот не предоставлен' });
+    }
+
+    console.log('Загружаемый скриншот:', file.originalname, file.mimetype, file.size);
+
+    const fileName = `${userId}/screenshot_${Date.now()}${path.extname(file.originalname)}`;
+    const bucketName = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
+
+    const params = {
+      Bucket: bucketName,
+      Key: fileName,
+      Body: file.buffer,
+      ContentType: file.mimetype,
+      ACL: 'public-read',
+    };
+
+    const s3Response = await s3.upload(params).promise();
+    const screenshotUrl = s3Response.Location;
+    console.log('Скриншот загружен в S3:', screenshotUrl);
+
+    res.json({
+      success: true,
+      message: 'Скриншот успешно загружен',
+      screenshot_url: screenshotUrl,
+    });
+  } catch (error) {
+    console.error('Ошибка при загрузке скриншота:', error.stack);
+    res.status(500).json({ success: false, message: 'Ошибка сервера при загрузке скриншота' });
+  }
+});
+
+// Остальные маршруты (без изменений)
 router.post('/upload/avatar', authenticateToken, (req, res, next) => {
   upload(req, res, (err) => {
     if (err instanceof multer.MulterError) {
@@ -183,7 +303,6 @@ router.post('/upload/avatar', authenticateToken, (req, res, next) => {
   }
 });
 
-// Маршрут для удаления аватара
 router.delete('/delete/avatar', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.id;
@@ -224,7 +343,6 @@ router.delete('/delete/avatar', authenticateToken, async (req, res) => {
   }
 });
 
-// Маршрут для загрузки историй
 router.post('/stories', authenticateToken, (req, res, next) => {
   upload(req, res, (err) => {
     if (err instanceof multer.MulterError) {
@@ -280,7 +398,6 @@ router.post('/stories', authenticateToken, (req, res, next) => {
   }
 });
 
-// Маршрут для загрузки голосовых сообщений
 router.post('/voice-messages', authenticateToken, (req, res, next) => {
   upload(req, res, (err) => {
     if (err instanceof multer.MulterError) {
@@ -336,7 +453,6 @@ router.post('/voice-messages', authenticateToken, (req, res, next) => {
   }
 });
 
-// Маршрут для получения историй
 router.get('/stories', authenticateToken, async (req, res) => {
   try {
     const [stories] = await pool.query(`
@@ -357,7 +473,6 @@ router.get('/stories', authenticateToken, async (req, res) => {
   }
 });
 
-// Маршрут для регистрации просмотра истории
 router.post('/stories/:id/view', authenticateToken, async (req, res) => {
   try {
     const storyId = req.params.id;
@@ -378,7 +493,6 @@ router.post('/stories/:id/view', authenticateToken, async (req, res) => {
   }
 });
 
-// Маршрут для получения просмотров истории
 router.get('/stories/:id/views', authenticateToken, async (req, res) => {
   try {
     const storyId = req.params.id;
@@ -417,7 +531,6 @@ router.get('/stories/:id/views', authenticateToken, async (req, res) => {
   }
 });
 
-// Маршрут для получения профиля пользователя
 router.get('/user/profile', authenticateToken, async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT name, phone, avatar_url FROM users WHERE id = ?', [req.user.id]);
@@ -441,7 +554,6 @@ router.get('/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// Маршрут для обновления профиля
 router.put('/users/profile', authenticateToken, async (req, res) => {
   try {
     const { name, phone, password } = req.body;
@@ -487,7 +599,6 @@ router.put('/users/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// Остальные маршруты
 router.post('/register', userController.register);
 router.post('/login', userController.login);
 router.get('/users', authenticateToken, async (req, res) => {
