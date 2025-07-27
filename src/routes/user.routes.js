@@ -1,3 +1,4 @@
+
 const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/user.controller');
@@ -76,7 +77,7 @@ const upload = multer({
   { name: 'video', maxCount: 1 },
   { name: 'voice', maxCount: 1 },
   { name: 'screenshot', maxCount: 1 },
-  { name: 'avatar', maxCount: 1 }, // Добавлен для загрузки аватара группы
+  { name: 'avatar', maxCount: 1 },
 ]);
 
 // Инициализация базы данных
@@ -88,7 +89,11 @@ const initializeDatabase = async () => {
     // Обновление таблицы users
     await connection.query(`
       ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(255) DEFAULT NULL
+      ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(255) DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS age INT DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS city VARCHAR(100) DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS country VARCHAR(100) DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS marital_status VARCHAR(50) DEFAULT NULL
     `);
 
     // Создание таблицы stories
@@ -153,20 +158,21 @@ const initializeDatabase = async () => {
       )
     `);
 
-  await connection.query(`
-  CREATE TABLE IF NOT EXISTS group_messages (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    group_id INT NOT NULL,
-    user_id INT NOT NULL,
-    content TEXT,
-    file_url VARCHAR(255) DEFAULT NULL,
-    file_type ENUM('image', 'video', 'audio') DEFAULT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-  )
-`);
-console.log('Таблица group_messages создана');
+    // Создание таблицы group_messages
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS group_messages (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        group_id INT NOT NULL,
+        user_id INT NOT NULL,
+        content TEXT,
+        file_url VARCHAR(255) DEFAULT NULL,
+        file_type ENUM('image', 'video', 'audio') DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+    console.log('Таблица group_messages создана');
 
     // Создание таблицы calls
     await connection.query(`
@@ -223,8 +229,6 @@ router.post('/call/initiate', authenticateToken, async (req, res) => {
   }
 });
 
-
-
 // Получение информации о группе
 router.get('/groups/:id', authenticateToken, async (req, res) => {
   try {
@@ -275,8 +279,6 @@ router.get('/groups/:id', authenticateToken, async (req, res) => {
   }
 });
 
-
-
 // Редактирование группы
 router.put('/groups/:id', authenticateToken, upload, async (req, res) => {
   try {
@@ -287,7 +289,7 @@ router.put('/groups/:id', authenticateToken, upload, async (req, res) => {
 
     // Проверяем, является ли пользователь создателем группы
     const [group] = await pool.query(
-      'SELECT creator_id FROM groups WHERE id = ?',
+      'SELECT creator_id, avatar_url FROM groups WHERE id = ?',
       [groupId]
     );
 
@@ -299,7 +301,7 @@ router.put('/groups/:id', authenticateToken, upload, async (req, res) => {
       return res.status(403).json({ success: false, message: 'Только создатель может редактировать группу' });
     }
 
-    let avatarUrl = null;
+    let avatarUrl = group[0].avatar_url;
     if (file) {
       const fileName = `${userId}/group_${Date.now()}${path.extname(file.originalname)}`;
       const bucketName = '4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75';
@@ -335,7 +337,7 @@ router.put('/groups/:id', authenticateToken, upload, async (req, res) => {
       updates.push('is_public = ?');
       values.push(is_public === 'true');
     }
-    if (avatarUrl) {
+    if (avatarUrl !== group[0].avatar_url) {
       updates.push('avatar_url = ?');
       values.push(avatarUrl);
     }
@@ -358,8 +360,6 @@ router.put('/groups/:id', authenticateToken, upload, async (req, res) => {
     res.status(500).json({ success: false, message: 'Ошибка сервера при редактировании группы' });
   }
 });
-
-
 
 // Исключение участника из группы
 router.delete('/groups/:groupId/members/:userId', authenticateToken, async (req, res) => {
@@ -409,8 +409,6 @@ router.delete('/groups/:groupId/members/:userId', authenticateToken, async (req,
     res.status(500).json({ success: false, message: 'Ошибка сервера при исключении участника' });
   }
 });
-
-
 
 // Отправка сообщения в группе
 router.post('/groups/:groupId/messages', authenticateToken, upload, async (req, res) => {
@@ -485,8 +483,6 @@ router.post('/groups/:groupId/messages', authenticateToken, upload, async (req, 
   }
 });
 
-
-
 // Получение сообщений группы
 router.get('/groups/:groupId/messages', authenticateToken, async (req, res) => {
   try {
@@ -540,21 +536,19 @@ router.get('/groups/:groupId/messages', authenticateToken, async (req, res) => {
   }
 });
 
-
-
-// Search users by name
+// Поиск пользователей по имени
 router.get('/users/search', authenticateToken, async (req, res) => {
   try {
-    const { query } = req.query; // Get search query from URL (e.g., ?query=Екатерина)
+    const { query } = req.query;
     const userId = req.user.id;
 
     if (!query || query.trim().length < 1) {
       return res.status(400).json({ success: false, message: 'Введите поисковый запрос' });
     }
 
-    const searchTerm = `%${query.trim()}%`; // Prepare for LIKE query
+    const searchTerm = `%${query.trim()}%`;
     const [rows] = await pool.query(
-      `SELECT id, name, phone, avatar_url, age, marital_status, city 
+      `SELECT id, name, phone, avatar_url, age, city, country, marital_status
        FROM users 
        WHERE id != ? AND name LIKE ?`,
       [userId, searchTerm]
@@ -570,8 +564,9 @@ router.get('/users/search', authenticateToken, async (req, res) => {
         phone: user.phone,
         avatar_url: user.avatar_url,
         age: user.age,
-        maritalStatus: user.marital_status,
         city: user.city,
+        country: user.country,
+        marital_status: user.marital_status,
         lastMessage: 'Нет сообщений',
         time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
         unread: 0,
@@ -582,6 +577,7 @@ router.get('/users/search', authenticateToken, async (req, res) => {
     res.status(500).json({ success: false, message: 'Ошибка сервера при поиске пользователей', error: error.message });
   }
 });
+
 // Покинуть группу
 router.delete('/groups/:groupId/leave', authenticateToken, async (req, res) => {
   try {
@@ -627,7 +623,7 @@ router.delete('/groups/:groupId/leave', authenticateToken, async (req, res) => {
     res.status(500).json({ success: false, message: 'Ошибка сервера при выходе из группы' });
   }
 });
-// Маршрут для создания группы
+
 // Маршрут для создания группы
 router.post('/groups', authenticateToken, upload, async (req, res) => {
   try {
@@ -684,8 +680,6 @@ router.post('/groups', authenticateToken, upload, async (req, res) => {
       const invalidMemberIds = memberIds.filter(mid => !validMemberIds.includes(mid));
       if (invalidMemberIds.length > 0) {
         console.warn('Некоторые user_id не существуют:', invalidMemberIds);
-        // Optionally, you can return an error or proceed with valid IDs
-        // return res.status(400).json({ success: false, message: `Пользователи с ID ${invalidMemberIds.join(', ')} не найдены` });
       }
 
       // Insert only valid member IDs
@@ -1079,7 +1073,10 @@ router.get('/stories/:id/views', authenticateToken, async (req, res) => {
 // Маршрут для получения профиля пользователя
 router.get('/user/profile', authenticateToken, async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT name, phone, avatar_url FROM users WHERE id = ?', [req.user.id]);
+    const [rows] = await pool.query(
+      'SELECT id, name, phone, avatar_url, age, city, country, marital_status FROM users WHERE id = ?',
+      [req.user.id]
+    );
     if (rows.length === 0) {
       console.error('Пользователь не найден, id:', req.user.id);
       return res.status(404).json({ success: false, message: 'Пользователь не найден' });
@@ -1089,9 +1086,14 @@ router.get('/user/profile', authenticateToken, async (req, res) => {
     res.json({
       success: true,
       data: {
+        id: user.id,
         name: user.name,
         phone: user.phone,
         avatar_url: user.avatar_url,
+        age: user.age,
+        city: user.city,
+        country: user.country,
+        marital_status: user.marital_status,
       },
     });
   } catch (error) {
@@ -1103,11 +1105,19 @@ router.get('/user/profile', authenticateToken, async (req, res) => {
 // Маршрут для обновления профиля
 router.put('/users/profile', authenticateToken, async (req, res) => {
   try {
-    const { name, phone, password } = req.body;
+    const { name, phone, password, age, city, country, marital_status } = req.body;
     const userId = req.user.id;
 
     if (!name || !phone) {
       return res.status(400).json({ success: false, message: 'Имя и телефон обязательны' });
+    }
+
+    if (marital_status && !['Женат/Замужем', 'Холост/Холостячка', 'В активном поиске'].includes(marital_status)) {
+      return res.status(400).json({ success: false, message: 'Недопустимое семейное положение' });
+    }
+
+    if (age && isNaN(parseInt(age))) {
+      return res.status(400).json({ success: false, message: 'Возраст должен быть числом' });
     }
 
     const updates = [];
@@ -1128,13 +1138,30 @@ router.put('/users/profile', authenticateToken, async (req, res) => {
       updates.push('password = ?');
       values.push(hashedPassword);
     }
+    if (age !== undefined) {
+      updates.push('age = ?');
+      values.push(age ? parseInt(age) : null);
+    }
+    if (city !== undefined) {
+      updates.push('city = ?');
+      values.push(city || null);
+    }
+    if (country !== undefined) {
+      updates.push('country = ?');
+      values.push(country || null);
+    }
+    if (marital_status !== undefined) {
+      updates.push('marital_status = ?');
+      values.push(marital_status || null);
+    }
 
-    values.push(userId);
-
-    await pool.query(
-      `UPDATE users SET ${updates.join(', ')} WHERE id = ?`,
-      values
-    );
+    if (updates.length > 0) {
+      values.push(userId);
+      await pool.query(
+        `UPDATE users SET ${updates.join(', ')} WHERE id = ?`,
+        values
+      );
+    }
 
     res.json({
       success: true,
@@ -1153,7 +1180,10 @@ router.post('/login', userController.login);
 // Маршрут для получения списка пользователей
 router.get('/users', authenticateToken, async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT id, name, phone, avatar_url FROM users WHERE id != ?', [req.user.id]);
+    const [rows] = await pool.query(
+      'SELECT id, name, phone, avatar_url, age, city, country, marital_status FROM users WHERE id != ?',
+      [req.user.id]
+    );
     console.log('Получены пользователи:', rows.length);
     res.json({
       success: true,
@@ -1162,6 +1192,10 @@ router.get('/users', authenticateToken, async (req, res) => {
         name: user.name,
         phone: user.phone,
         avatar_url: user.avatar_url,
+        age: user.age,
+        city: user.city,
+        country: user.country,
+        marital_status: user.marital_status,
         lastMessage: 'Нет сообщений',
         time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
         unread: 0,
